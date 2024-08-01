@@ -28,8 +28,8 @@
     <SuiteName>CIGALHE MFD</SuiteName>
     <OpenBrowserOnPublish>false</OpenBrowserOnPublish>
     <DisallowUrlActivation>true</DisallowUrlActivation>
-    <ApplicationRevision>6</ApplicationRevision>
-    <ApplicationVersion>4.0.1.%2a</ApplicationVersion>
+    <ApplicationRevision>45</ApplicationRevision>
+    <ApplicationVersion>5.0.0.%2a</ApplicationVersion>
     <UseApplicationTrust>false</UseApplicationTrust>
     <CreateDesktopShortcut>true</CreateDesktopShortcut>
     <PublishWizardCompleted>true</PublishWizardCompleted>
@@ -132,6 +132,7 @@
     <Compile Include="ScratchesForm.Designer.cs">
       <DependentUpon>ScratchesForm.cs</DependentUpon>
     </Compile>
+    <Compile Include="SharedData.cs" />
     <Compile Include="TestInfoForm.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -186,6 +187,7 @@
       <DependentUpon>Settings.settings</DependentUpon>
       <DesignTimeSharedInput>True</DesignTimeSharedInput>
     </Compile>
+    <Content Include="Bird_in_Rain.wav" />
     <Content Include="Images\Focus adj ring.png">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
@@ -195,6 +197,8 @@
     <Content Include="Images\MFD Power Supply -- Power ON.png">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
+    <Content Include="Images\ROSE Bezel Buttons - All Functions.png" />
+    <Content Include="Images\ROSE Bezel Buttons - Legends.png" />
     <Content Include="Images\TiltTableNormalToUserWedgeInstructions.png">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
@@ -315,6 +319,26 @@
       <FileType>File</FileType>
     </PublishFile>
     <PublishFile Include="Images\MFD Power Supply -- Power ON.png">
+      <Visible>False</Visible>
+      <Group>
+      </Group>
+      <TargetPath>
+      </TargetPath>
+      <PublishState>DataFile</PublishState>
+      <IncludeHash>True</IncludeHash>
+      <FileType>File</FileType>
+    </PublishFile>
+    <PublishFile Include="Images\ROSE Bezel Buttons - All Functions.png">
+      <Visible>False</Visible>
+      <Group>
+      </Group>
+      <TargetPath>
+      </TargetPath>
+      <PublishState>DataFile</PublishState>
+      <IncludeHash>True</IncludeHash>
+      <FileType>File</FileType>
+    </PublishFile>
+    <PublishFile Include="Images\ROSE Bezel Buttons - Legends.png">
       <Visible>False</Visible>
       <Group>
       </Group>

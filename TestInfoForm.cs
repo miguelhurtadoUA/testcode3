@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Linq; 
 using System.Windows.Forms;
 
 namespace CIGALHE.MFD.Optical
@@ -19,6 +20,8 @@ namespace CIGALHE.MFD.Optical
             cmboPartNo.Items.Add("MB0808T-01");
             cmboPartNo.Items.Add("850054-000598");
             cmboPartNo.Items.Add("850054-002101");
+            cmboPartNo.Items.Add("MB1690A-20");
+            cmboPartNo.Items.Add("MB1690A-10");
         }
 
         private void btnAccept_Click(object sender, EventArgs e)
@@ -188,6 +191,38 @@ namespace CIGALHE.MFD.Optical
                         return false;
                     }
                 }
+                else if (strPN == "MB1690A-20" || strPN == "MB1690A-10")
+                {
+                    string intSerialNoString = intSerialNo.ToString("D4"); // Format the integer to a 4-digit string with leading zeros
+
+                    if (intSerialNoString.Length == 4)
+                    {
+                        bool isNumeric = true;
+                        foreach (char c in intSerialNoString)
+                        {
+                            if (!char.IsDigit(c))
+                            {
+                                isNumeric = false;
+                                break;
+                            }
+                        }
+
+                        if (isNumeric)
+                        {
+                            return true;
+                        }
+                        else
+                        {
+                            MessageBox.Show("Serial number should only contain numbers", "Incorrect Serial Number Format");
+                            return false;
+                        }
+                    }
+                    else
+                    {
+                        MessageBox.Show("Serial number should only contain four digit numbers", "Incorrect Serial Number Format");
+                        return false;
+                    }
+                }
                 else
                 {
                     MessageBox.Show("Invalid part number: " + strPN, "UUT Part Number");
@@ -200,5 +235,6 @@ namespace CIGALHE.MFD.Optical
                 return false;
             }
         }
+
     }
 }

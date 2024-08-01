@@ -3,6 +3,7 @@ using System.IO;
 using System.Windows.Forms;
 using CS.Libraries.File.Initialization;
 using ChromaMeter;
+using MFD_Optical;
 
 namespace CIGALHE.MFD.Optical
 {
@@ -18,23 +19,25 @@ namespace CIGALHE.MFD.Optical
         public LightReading AdjustColor(MFD_Optical.TestColor testColor, LightReading lightReading)
         {
             double uAdjustment = 0, vAdjustment = 0;
+            string partNumber = SharedData.Instance.PartNumber;
 
             // TestColor is an enum with values such as 'blue_Day' and 'yellow_NVG'.
             // This section breaks a TestColor value into two strings: 'color' and 'dayNVG'.
             string colorPlusMode = testColor.ToString();
             int len = colorPlusMode.Length;
-            string color = colorPlusMode.Substring(0, len - 4); //stirng splitting
-            string dayNVG = colorPlusMode.Substring(len - 3, 3); //string splitting
+            string color = colorPlusMode.Substring(0, len - 4); // string splitting
+            string dayNVG = colorPlusMode.Substring(len - 3, 3); // string splitting
 
-            string sectionName = $"[Color Correction, {color}, {dayNVG}]";
+            // Need to add in the extra part# heading then follow with the color correction offsets
+            string sectionName = $"Color Correction, {color}, {dayNVG}";
             string key = null;
 
             try
             {
                 key = "u'";
-                uAdjustment = Convert.ToDouble(_IniFile.GetValue(sectionName, key));
+                uAdjustment = Convert.ToDouble(_IniFile.GetValue(partNumber, sectionName, key));
                 key = "v'";
-                vAdjustment = Convert.ToDouble(_IniFile.GetValue(sectionName, key));
+                vAdjustment = Convert.ToDouble(_IniFile.GetValue(partNumber, sectionName, key));
             }
             catch
             {

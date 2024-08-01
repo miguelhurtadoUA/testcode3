@@ -3,12 +3,16 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Media;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using CS.Libraries.Forms.Prompts;
 using ChromaMeter;
 using XYPositionSystem;
+using MFD_Optical;
+
+// lblUUTPartNo.Text; is how to access the part number used
 
 namespace CIGALHE.MFD.Optical
 {
@@ -16,6 +20,7 @@ namespace CIGALHE.MFD.Optical
     {
         private DateTime _beginDateTime, _endDateTime;
         private string _operatorComment;
+        private SoundPlayer _progressSoundPlayer;
 
         // Section of test that is currently running
         private static string _task;
@@ -41,98 +46,136 @@ namespace CIGALHE.MFD.Optical
 
         private static Power _supplementalLightState = Power.OFF;
 
-        // Run tests
-        private async Task RunTests()
+        private void SetPartNumber()
         {
-            if (rtbTestResults.Text.Length != 0)
+            SharedData.Instance.PartNumber = lblUUTPartNo.Text; // Update the singleton instance with the part number from the label
+        }
+
+
+
+        private Dictionary<string, List<string>> testPrerequisites = new Dictionary<string, List<string>>() 
+        {//This dictionary sets the prereqs to each test 
+            { "2.1. Scratches", new List<string> { "1.1. Power On" } },
+            { "2.2. Blemishes", new List<string> { "1.1. Power On" } },
+            { "2.3. Defective Pixels", new List<string> { "1.1. Power On" } },
+            { "3.1. Contrast - Day", new List<string> { "1.1. Power On" } },
+            { "3.2. Brightness Range - Day", new List<string> { "1.1. Power On", "3.1. Contrast - Day" } },
+            { "3.3. Luminance Homogeneity - Day", new List<string> { "1.1. Power On" } },
+            { "3.4. Color Coordinates & Uniformity - Day", new List<string> { "1.1. Power On" } },
+            { "4.1. Brightness Range - NVG", new List<string> { "1.1. Power On" } },
+            { "4.2. Luminance Homogeneity - NVG", new List<string> { "1.1. Power On" } },
+            { "4.3. Color Coordinates - NVG", new List<string> { "1.1. Power On" } },
+            { "4.4. NVG Compatibility", new List<string> { "1.1. Power On" } },
+            { "4.5. Bezel Lighting", new List<string> { "1.1. Power On" } },
+            { "4.6. Bezel Backlighting", new List<string> { "1.1. Power On", "4.5. Bezel Lighting" } },
+            { "4.7. Power LED", new List<string> { "1.1. Power On" } },
+            { "5.1. Power Off", new List<string> { "1.1. Power On" } }
+        };
+
+        // Run tests
+        private async Task RunTestsAsync(CancellationToken cancellationToken = default)
+        {
+            try
             {
-                MessageBox.Show("The previous test results will be cleared.", "Clearing Test Results");
-                ClearTestResults();
-                Thread.Sleep(600);
-                var result = MessageBox.Show("Click OK to run the new test.", "Start Test", MessageBoxButtons.OKCancel);
-                if (result == DialogResult.Cancel) return;
-            }
-
-            EnterTestInformation();
-
-            ACRO55._chromaMeterPosition = null;
-            _pfTallies = new SortedList<string, TestPassFail>();
-
-            _beginDateTime = DateTime.Now;
-            PostATRHeader();
-
-            _numTestsSelected = CountSelectedTests();
-
-            // Run selected tests
-            _numTestsRun = 0;
-            int taskIdx = 0;
-            foreach (TreeNode taskNode in testSelectionTree.Nodes[0].Nodes)
-            {
-                int testIdx = 0;
-                foreach (TreeNode testNode in taskNode.Nodes)
+                if (rtbTestResults.Text.Length != 0)
                 {
-                    if (testNode.Checked)
+                    MessageBox.Show("The previous test results will be cleared.", "Clearing Test Results");
+                    ClearTestResults();
+                    await Task.Delay(600, cancellationToken).ConfigureAwait(false);
+                    var result = MessageBox.Show("Click OK to run the new test.", "Start Test", MessageBoxButtons.OKCancel);
+                    if (result == DialogResult.Cancel) return;
+                }
+
+                EnterTestInformation();
+
+                ACRO55._chromaMeterPosition = null;
+                _pfTallies = new SortedList<string, TestPassFail>();
+
+                _beginDateTime = DateTime.Now;
+                PostATRHeader();
+
+                _numTestsSelected = CountSelectedTests();
+                _numTestsRun = 0;
+                int taskIdx = 0;
+                foreach (TreeNode taskNode in testSelectionTree.Nodes[0].Nodes)
+                {
+                    int testIdx = 0;
+                    foreach (TreeNode testNode in taskNode.Nodes)
                     {
-                        await Task.Run(() => _subTests[taskIdx][testIdx]());
-                        _numTestsRun++;
-                        _resultsSaved = false;
-                        Thread.Sleep(600);
+                        if (testNode.Checked)
+                        {
+                            // Ensure each test is awaited before moving to the next
+                            await _subTests[taskIdx][testIdx](cancellationToken);
+                            _numTestsRun++;
+                            _resultsSaved = false;
+                            await Task.Delay(600, cancellationToken).ConfigureAwait(false);
+                        }
+                        testIdx++;
                     }
-                    testIdx++;
+                    taskIdx++;
                 }
-                taskIdx++;
-            }
-            _endDateTime = DateTime.Now;
+                _endDateTime = DateTime.Now;
 
-            if (_numTestsRun > 0)
-            {
-                PostBlankLines(numLines: 3);
-                PostDateAndTime(_endDateTime);
-                PostBlankLine();
-                PostATRSummary();
-                PostBlankLines(numLines: 3);
-                PostATRFooter();
-                string fullPathName = SaveTestResults();
-                Popup.Show($"Test results have been automatically named and saved as\n" +
-                           $"        {Path.GetFileName(fullPathName)}\n\n" +
-                           $"Location: {Path.GetDirectoryName(fullPathName)}",
-                           title: "Saved");
-                
-                Popup.Show("Complete the following:\n" +
-                        "     1. Turn on the room lights\n" +
-                        "     2. Open the door\n" +
-                        "     3. Flip the Testing sign on the door\n\n",
-                         title: "Room Clean-Up");
-
-                Popup.Show("Turn off the following three pieces of equipment\n" +
-                        "in the order listed:\n" +
-                        "     1. CS-200 Chroma Meter,\n" +
-                        "     2. Blackbox Controller,\n" +
-                        "     3. POWER SUPPLY to Blackbox Controller\n\n",
-                         title: "Equipment Power-off");
-
-                if (_numTestsRun == CountSubtestsInFullTest())
+                if (_numTestsRun > 0)
                 {
-                    SwitchSupplementalLight(Power.ON);
-                    Popup.Show("Remove wedge from tilt table and set table to 0 degrees horizontal and vertical.\n\n" +
-                               "Turn off Topward Power Supply and remove banana plug cables.", title: "Test Finished");
+                    PostBlankLines(3);
+                    PostDateAndTime(_endDateTime);
+                    PostBlankLine();
+                    PostATRSummary();
+                    PostBlankLines(3);
+                    PostATRFooter();
+                    string fullPathName = SaveTestResults();
+                    Popup.Show($"Test results have been automatically named and saved as\n" +
+                               $"        {Path.GetFileName(fullPathName)}\n\n" +
+                               $"Location: {Path.GetDirectoryName(fullPathName)}",
+                               title: "Saved");
+
+                    Popup.Show("Complete the following:\n" +
+                            "     1. Turn on the room lights\n" +
+                            "     2. Open the door\n" +
+                            "     3. Flip the Testing sign on the door\n\n",
+                             title: "Room Clean-Up");
+
+                    Popup.Show("Turn off the following three pieces of equipment\n" +
+                            "in the order listed:\n" +
+                            "     1. CS-200 Chroma Meter,\n" +
+                            "     2. Blackbox Controller,\n" +
+                            "     3. POWER SUPPLY to Blackbox Controller\n\n",
+                             title: "Equipment Power-off");
+
+                    if (_numTestsRun == CountSubtestsInFullTest())
+                    {
+                        SwitchSupplementalLight(Power.ON);
+                        Popup.Show("Remove wedge from tilt table and set table to 0 degrees horizontal and vertical.\n\n" +
+                                   "Turn off Topward Power Supply and remove banana plug cables.", title: "Test Finished");
+                    }
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                MessageBox.Show("Test run was canceled.", "Cancellation", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"An error occurred: {ex.Message}\n{ex.StackTrace}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
-        //------------------------------------------- Section 1.1 -------------------------------------------
 
-        private void Test1_PowerOnAndColorPattern()
+
+        //------------------------------------------- Section 1.1 -------------------------------------------
+        private async Task Test1_PowerOnAndColorPattern(CancellationToken cancellationToken)
         {//Prompts the user to preform all preliminary actions to begin test 
-            SetUpTestSection("1. Power On", "1.1.", "Power On");
+            //needs async to stop excecution of test/ thread after 
+            SetUpTestSection("1. Power On", "1.1.", "Power On", cancellationToken);
 
             _unitsOfMeasure = "sec";
-            
+
             PromptUserToPrepareRoom();
             SetUpTopwardPowerSupply();
-            
+
             PromptUserToTurnOnBacklighting();
-           
+
             PromptUserToPowerOnMFD();
 
             DateTime beginWait = DateTime.Now;
@@ -145,25 +188,27 @@ namespace CIGALHE.MFD.Optical
             TimeSpan elapsedTime = endWait - beginWait;
 
             PostElapsedTimeResult(elapsedTime, 120);
-            
+
             PromptUserToDisplayColorBars();
-            
+
             PromptUserToSetDayMode();
 
             PostSubTestPassFailFooter();
             UpdateTestNameAndStatusFields("Finished");
+            await Task.Delay(600, cancellationToken);
         }
 
         //------------------------------------------- Section 2.1 -------------------------------------------
 
-        private void Test2_1_AssessScratches()
+        private async Task Test2_1_AssessScratches(CancellationToken cancellationToken)
         {//2.1 Prompts the user to look for scratches
-            SetUpTestSection("2. Display Defects", "2.1.", "Scratches");
+            //needs async to stop excecution of the tests/ threads after 
+            SetUpTestSection("2. Display Defects", "2.1.", "Scratches", cancellationToken);
 
             SetTiltTableNormalToUser();
-            
+
             PromptUserToTurnOffBacklighting();
-            
+
             PromptUserToViewFromDistance();
 
             ScratchesForm frmScratches = new ScratchesForm();
@@ -173,21 +218,22 @@ namespace CIGALHE.MFD.Optical
 
             PostSubTestPassFailFooter();
             UpdateTestNameAndStatusFields("Finished");
-            Thread.Sleep(600);
+            await Task.Delay(600, cancellationToken);  
         }
 
         //------------------------------------------- Section 2.2 -------------------------------------------
 
-        private void Test2_2_AssessBlemishes()
+        private async Task Test2_2_AssessBlemishesAsync(CancellationToken cancellationToken)
         {//2.2 Test to look for blemishes
-            SetUpTestSection("2. Display Defects", "2.2.", "Blemishes");
+            //needs an await to stop execution of next test 
+            SetUpTestSection("2. Display Defects", "2.2.", "Blemishes", cancellationToken);
 
-            AdjustUUTtoMediumBrightness(Mode.Day);
+            await AdjustUUTtoMediumBrightnessAsync(Mode.Day, cancellationToken);
             if (_supplementalLightState == Power.OFF) SwitchSupplementalLight(Power.ON);
             SetTiltTableNormalToUser();
 
-            BlemishesForm blemishesForm = new BlemishesForm(); //creates blemishes form instance\
-            
+            BlemishesForm blemishesForm = new BlemishesForm(); //creates blemishes form instance
+
             DialogResult dialogResult = Popup.Show("Inspect the display from a distance of 28 inches and all angles.\n\n" +
                                                   "Does the LCD have any of the following defects:\n" +
                                                   "      * Blemishes\n" +
@@ -212,25 +258,37 @@ namespace CIGALHE.MFD.Optical
             AudibleAlert();
             PostSubTestPassFailFooter();
             UpdateTestNameAndStatusFields("Finished");
+            await Task.Delay(600, cancellationToken);
         }
 
         //------------------------------------------- Section 2.3 -------------------------------------------
 
-        private void Test2_3_AssessDefectivePixels()
+        private async Task Test2_3_AssessDefectivePixelsAsync(CancellationToken cancellationToken)
         {//2.3 test to look for defective pixels
-            SetUpTestSection("2. Display Defects", "2.3.", "Defective Pixels");
+            SetUpTestSection("2. Display Defects", "2.3.", "Defective Pixels", cancellationToken);
 
-            AdjustUUTtoMediumBrightness(Mode.Day); //set brightness to medium
+            await AdjustUUTtoMediumBrightnessAsync(Mode.Day, cancellationToken); //set brightness to medium
 
             SetTiltTableNormalToUser();
             if (_supplementalLightState == Power.ON) SwitchSupplementalLight(Power.OFF);
 
             AudibleAlert();
-            Popup.Show("Use WHITE and BLACK color patterns to show failed OFF and\n" +
-                        "failed ON pixels.  (Other colors may be used as well.)\n\n" +
-                        "Report the number of failed pixels on the next form.", title: "Examine LCD",
-                        msgBoxButtons: MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - Test Patterns.png",
-                        imagePopupTitle: "CIGALHE MFD Bezel");
+            if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                Popup.Show("Use WHITE and BLACK color patterns to show failed OFF and\n" +
+                       "failed ON pixels.  (Other colors may be used as well.)\n\n" +
+                       "Report the number of failed pixels on the next form.", title: "Examine LCD",
+                       msgBoxButtons: MessageBoxButtons.OK, imageFile: ImagesFolder + "ROSE Bezel Buttons - All functions.png",
+                       imagePopupTitle: "ROSE MFD Bezel");
+            }
+            else
+            {
+                Popup.Show("Use WHITE and BLACK color patterns to show failed OFF and\n" +
+                       "failed ON pixels.  (Other colors may be used as well.)\n\n" +
+                       "Report the number of failed pixels on the next form.", title: "Examine LCD",
+                       msgBoxButtons: MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - Test Patterns.png",
+                       imagePopupTitle: "CIGALHE MFD Bezel");
+            }
 
             PostHeader(MaximumAllowedHeader);
             FailedPixelsForm frmFailedPixels = new FailedPixelsForm();
@@ -243,33 +301,47 @@ namespace CIGALHE.MFD.Optical
             AudibleAlert();
             PostSubTestPassFailFooter();
             UpdateTestNameAndStatusFields("Finished");
+            await Task.Delay(600, cancellationToken);
         }
 
         //------------------------------------------- Section 3.1 -------------------------------------------
 
-        private void Test3_TestContrast_Day()
-        {//test of contrast (day)
-            SetUpTestSection("3. Day Mode", "3.1.", "Contrast - Day");
+        private async Task Test3_TestContrast_DayAsync(CancellationToken cancellationToken)
+        {
+            // Ensure _ChromaMeter and _XYTable are not null
+            if (_ChromaMeter == null)
+            {
+                throw new InvalidOperationException("_ChromaMeter is not initialized. test3");
+            }
+
+            if (_XYTable == null)
+            {
+                throw new InvalidOperationException("_XYTable is not initialized.test3");
+            }
+
+            // Proceed with the test if both are initialized
+            SetUpTestSection("3. Day Mode", "3.1.", "Contrast - Day", cancellationToken);
 
             SwitchSupplementalLight(Power.ON);
-            _XYTable.MoveToPosition(_XYTable.LCD_middleCenterViewingSpot);
+            await MoveToPositionWithSoundAsync(_XYTable.LCD_middleCenterViewingSpot, cancellationToken);
 
             List<KeyValuePair<string, int>> contrastRatios = new List<KeyValuePair<string, int>>();
             _nonNormalMaxWhiteReadings = new List<LightReading>();
 
-            TestContrastAtMultipleAngles(contrastRatios);
+            await TestContrastAtMultipleAnglesAsync(contrastRatios, cancellationToken);
 
             PostContrastResults(contrastRatios);
 
-            // AudibleAlert();
             AudibleAlert();
-            PostSubTestPassFailFooter();//sets pass/fail based on tallies
+            PostSubTestPassFailFooter();
             UpdateTestNameAndStatusFields("Finished");
+            await Task.Delay(600, cancellationToken);
         }
+
 
         //------------------------------------------- Section 3.2 -------------------------------------------
 
-        private void Test4_TestBrightnessRange_Day()
+        private async Task Test4_TestBrightnessRange_DayAsync(CancellationToken cancellationToken)
         {// Test for the brightness of Day setting 
             if (_nonNormalMaxWhiteReadings == null)
             {
@@ -278,7 +350,7 @@ namespace CIGALHE.MFD.Optical
                                                        MessageBoxButtons.YesNo);
                 if (dialogResult == DialogResult.Yes)
                 {
-                    Test3_TestContrast_Day(); 
+                    await Test3_TestContrast_DayAsync(cancellationToken);
                 }
                 else
                 {
@@ -290,40 +362,39 @@ namespace CIGALHE.MFD.Optical
                 }
             }
 
-            SetUpTestSection("3. Day Mode", "3.2.", "Brightness Range - Day");
+            SetUpTestSection("3. Day Mode", "3.2.", "Brightness Range - Day", cancellationToken);
 
             if (_supplementalLightState == Power.OFF) SwitchSupplementalLight(Power.ON);
             SetTiltTableNormal();//set the table normal to the chromameter
-            _XYTable.MoveToPosition(_XYTable.LCD_middleCenterViewingSpot); //moves chromameter to the center of the viewing spot
+            await MoveToPositionWithSoundAsync(_XYTable.LCD_middleCenterViewingSpot, cancellationToken); //moves chromameter to the center of the viewing spot
 
             _unitsOfMeasure = "fL";
-            
-            TestBrightness("Maximum", "maximum brightness (BRT = 127)");
+
+            await TestBrightnessAsync("Maximum", "maximum brightness (LUM = 127)", false, cancellationToken);
             _uutMediumBrightness = false;
-            // AudibleAlert();
             PostBlankLines(numLines: 2);
-            
-            TestBrightness("Minimum", "minimum brightness (BRT = 1)");
+
+            await TestBrightnessAsync("Minimum", "minimum brightness (LUM = 1)", true, cancellationToken);
             _uutMediumBrightness = false;
 
             PostCornerBrightnessResults();
 
-            // AudibleAlert();
             AudibleAlert();
             PostSubTestPassFailFooter();
             UpdateTestNameAndStatusFields("Finished");
+            await Task.Delay(600, cancellationToken);
         }
 
         //------------------------------------------- Section 3.3 -------------------------------------------
 
-        internal void Test5_TestLuminanceHomogeneity_Day()
+        internal async Task Test5_TestLuminanceHomogeneity_DayAsync(CancellationToken cancellationToken)
         {//test for the luminance homogeneity (day)
-            SetUpTestSection("3. Day Mode", "3.3.", "Luminance Homogeneity - Day");
+            SetUpTestSection("3. Day Mode", "3.3.", "Luminance Homogeneity - Day", cancellationToken);
 
-            AdjustUUTtoMediumBrightness(Mode.Day);
+            await AdjustUUTtoMediumBrightnessAsync(Mode.Day, cancellationToken);
             AudibleAlert();
             TurnOffLightAndCoverMonitor();
-            LightReading whiteReading = _ChromaMeter.TakeMeasurement();
+            LightReading whiteReading = await Task.Run(() => _ChromaMeter.TakeMeasurement(), cancellationToken); 
             PostHeader(MeasurementHeader);
             GradeResultAndTallyPassFail(whiteReading.Lv, BrightnessDayNormalMedLowerLimit,
                 BrightnessDayNormalMedUpperLimit);// checks if values are within range
@@ -331,146 +402,142 @@ namespace CIGALHE.MFD.Optical
             PostMeasurement(MeasurementFormatDbl1Int, "White Test Pattern", whiteReading.Lv,
                 BrightnessDayNormalMedLowerLimit, BrightnessDayNormalMedUpperLimit);
 
-            TakeLightReadingsFromNinePositions(TestColor.White_Day); //takes light reading at 9 positions for white(day)
+            await TakeLightReadingsFromNinePositionsAsync(TestColor.White_Day, cancellationToken); //takes light reading at 9 positions for white(day)
             PostBlankLine(); //needed not in helper methods
             PostNineReadingsTable(TestColor.White_Day);
 
             PostLuminanceResults();
 
-            
-            _XYTable.MoveToPosition(_XYTable.LCD_middleCenterViewingSpot); //moves chromameter to center of the display
+            await MoveToPositionWithSoundAsync(_XYTable.LCD_middleCenterViewingSpot, cancellationToken); //moves chromameter to center of the display
             AudibleAlert();
             PostSubTestPassFailFooter();
             UpdateTestNameAndStatusFields("Finished");
+            await Task.Delay(600, cancellationToken);
         }
 
         //------------------------------------------- Section 3.4 -------------------------------------------
 
-        internal void Test6_TestColorCoordinatesAndUniformity_Day()
-        {// test for color coordinates and uniformity
-            SetUpTestSection("3. Day Mode", "3.4.", "Color Coordinates & Uniformity - Day");
+        internal async Task Test6_TestColorCoordinatesAndUniformity_DayAsync(CancellationToken cancellationToken)
+        {// test for color coordinates and uniformity 
+            SetUpTestSection("3. Day Mode", "3.4.", "Color Coordinates & Uniformity - Day", cancellationToken);
 
             SetTiltTableNormal(); // sets the table normal to the chromameter
-            
 
             _unitsOfMeasure = "---";
             _measurements = new SortedList<TestColor, SortedList<string, LightReading>>();
 
-            TestColorCoordinatesAtMultipleSpots_Day();
+            await TestColorCoordinatesAtMultipleSpots_DayAsync(cancellationToken);
 
-            PostChromaUniformityResults();
+            await PostChromaUniformityResultsAsync(cancellationToken);
 
-            // AudibleAlert();
-            _XYTable.MoveToPosition(_XYTable.LCD_middleCenterViewingSpot); // moves chromameter to center of display
+            await MoveToPositionWithSoundAsync(_XYTable.LCD_middleCenterViewingSpot, cancellationToken); // moves chromameter to center of display
             AudibleAlert();
             PostSubTestPassFailFooter();
             UpdateTestNameAndStatusFields("Finished");
-            
+            await Task.Delay(600, cancellationToken);
+
         }
 
         //------------------------------------------- Section 4.1 -------------------------------------------
 
-        internal void Test7_TestBrightnessRange_NVG()
-        {// Test for the brightness of NVG setting 
-            SetUpTestSection("4. NVG Mode", "4.1.", "Brightness Range - NVG");
+        internal async Task Test7_TestBrightnessRange_NVGAsync(CancellationToken cancellationToken)
+        {
+            SetUpTestSection("4. NVG Mode", "4.1.", "Brightness Range - NVG", cancellationToken);
 
-            
             SetTiltTableNormal();//set the table normal to the chromameter
-           
 
             _unitsOfMeasure = "fL";
 
             LightReading whiteReading;
             PostLineOfText("   Maximum - Center-of-Display, Normal Incidence:\n", bold: true);
-            
+
             PromptUserToDisplayWhiteNVG();
-            whiteReading = _ChromaMeter.TakeMeasurement();
+            whiteReading = await Task.Run(() => _ChromaMeter.TakeMeasurement(), cancellationToken);
             ValidateWhiteReading(whiteReading);
 
             PostHeader(MeasurementHeader);
             GradeResultAndTallyPassFail(whiteReading.Lv, BrightnessNVGMaxLowerLimit, BrightnessNVGMaxUpperLimit);
             PostMeasurement(MeasurementFormatDbl2Int, " ", whiteReading.Lv, BrightnessNVGMaxLowerLimit, BrightnessNVGMaxUpperLimit);
 
-            TestBrightnessNVG(); 
+             await TestBrightnessNVGAsync(cancellationToken);
 
-            // AudibleAlert(); 
             AudibleAlert();
             PostSubTestPassFailFooter();
             UpdateTestNameAndStatusFields("Finished");
+            await Task.Delay(600, cancellationToken);
         }
+
 
         //------------------------------------------- Section 4.2 -------------------------------------------
         // This test is identical to Section 3.3 except for NVG instead of Day in two places
 
-        internal void Test8_TestLuminanceHomogeneity_NVG()
+        internal async Task Test8_TestLuminanceHomogeneity_NVGAsync(CancellationToken cancellationToken)
         {//test for luminance homogenity in NVG mode
-            SetUpTestSection("4. NVG Mode", "4.2.", "Luminance Homogeneity - NVG");
+            SetUpTestSection("4. NVG Mode", "4.2.", "Luminance Homogeneity - NVG", cancellationToken);
             PostLineOfText("NVG Mode, White Test Pattern, Maximum Brightness");
 
-            
             SetTiltTableNormal();// sets table normal to chromameter
-            _XYTable.MoveToPosition(_XYTable.LCD_middleCenterViewingSpot);//moves chromameter to center of display
+            await MoveToPositionWithSoundAsync(_XYTable.LCD_middleCenterViewingSpot, cancellationToken);//moves chromameter to center of display
 
             AudibleAlert();
             PromptUserToDisplayWhiteNVG();
-            TakeLightReadingsFromNinePositions(TestColor.White_Day); // takes 9 readings of luminance in NVG mode, should not beep when taking measurements
+            await TakeLightReadingsFromNinePositionsAsync(TestColor.White_Day, cancellationToken); // takes 9 readings of luminance in NVG mode, should not beep when taking measurements
             PostNineReadingsTable(TestColor.White_Day); //prints results 
             PostLuminanceResults();
 
-            // AudibleAlert(); //needed, pretty sure
-            _XYTable.MoveToPosition(_XYTable.LCD_middleCenterViewingSpot); //sets chromameter to the center of the display
+            await MoveToPositionWithSoundAsync(_XYTable.LCD_middleCenterViewingSpot, cancellationToken); //sets chromameter to the center of the display
             AudibleAlert();
             PostSubTestPassFailFooter();
             UpdateTestNameAndStatusFields("Finished");
-            
+            await Task.Delay(600, cancellationToken);
+
         }
 
         //------------------------------------------- Section 4.3 -------------------------------------------
 
-        internal void Test9_TestColorCoordinates_NVG()
+        internal async Task Test9_TestColorCoordinates_NVGAsync(CancellationToken cancellationToken)
         {// test for the color coordinates in NVG mode
-            SetUpTestSection("4. NVG Mode", "4.3.", "Color Coordinates - NVG");
+            SetUpTestSection("4. NVG Mode", "4.3.", "Color Coordinates - NVG", cancellationToken);
 
-            SetTiltTableNormal(); //sets table normal to the chromameter 
-            
+            SetTiltTableNormal(); //sets table normal to the chromameter
 
             // Color Coordinates
             _unitsOfMeasure = "---";
             _measurements = new SortedList<TestColor, SortedList<string, LightReading>>();
 
             string testPoint = "#5";
-            _XYTable.MoveToPosition(_XYTable.LCD_middleCenterViewingSpot); //sets chromameter to the center of the display
-            TestColorCoordinatesAtOneSpot_NVG(testPoint);// takes meausrements of red and yellow in NVG mode and prints results (pass/fail)
+            await MoveToPositionWithSoundAsync(_XYTable.LCD_middleCenterViewingSpot, cancellationToken); //sets chromameter to the center of the display
+            await TestColorCoordinatesAtOneSpotAsync_NVG(testPoint, cancellationToken);// takes meausrements of red and yellow in NVG mode and prints results (pass/fail)
 
-            // AudibleAlert();
             AudibleAlert();
             PostSubTestPassFailFooter();
             UpdateTestNameAndStatusFields("Finished");
+            await Task.Delay(600, cancellationToken);
         }
 
         //------------------------------------------- Section 4.4 -------------------------------------------
 
-        internal void Test10_TestNVGCompatibility()
-        {// test for NVG compatibility
-            SetUpTestSection("4. NVG Mode", "4.4.", "NVG Compatibility");
+        internal async Task Test10_TestNVGCompatibilityAsync(CancellationToken cancellationToken)
+        { //test for NVG compatibility
+            SetUpTestSection("4. NVG Mode", "4.4.", "NVG Compatibility", cancellationToken);
 
             _unitsOfMeasure = "---";
             string prompt;
             DialogResult expectedResponse = DialogResult.Yes;
             DialogResult operatorResponse;
 
-            AdjustUUTtoMediumBrightness(Mode.NVG); // sets brightness to medium
+            await AdjustUUTtoMediumBrightnessAsync(Mode.NVG, cancellationToken); // sets brightness to medium
 
-            Thread.Sleep(600);
-            
+            await Task.Delay(600, cancellationToken);
+
             Popup.Show("Verify bezel backlighting voltage is 28 V and adjust if necessary.\n",
                         title: "Maximum Bezel Backlighting");
 
-            Thread.Sleep(600);
+            await Task.Delay(600, cancellationToken);
             if (_supplementalLightState == Power.OFF) SwitchSupplementalLight(Power.ON);
-            Thread.Sleep(600);
+            await Task.Delay(600, cancellationToken);
             SetTiltTableNormalToUser();
-            Thread.Sleep(600);
+            await Task.Delay(600, cancellationToken);
             if (_supplementalLightState == Power.ON) SwitchSupplementalLight(Power.OFF);
 
             AudibleAlert();
@@ -482,19 +549,21 @@ namespace CIGALHE.MFD.Optical
             PostUserPromptToTestResults("   " + prompt, doubleSpaced: true);
             operatorResponse = Popup.Show(prompt, "Light Leakage", MessageBoxButtons.YesNo);
             PostHeader(ReceivedExpectedHeader);
-            GradeResultAndTallyPassFail(operatorResponse, expectedResponse); // asseses if the bezel had any light leakage, pass/fail
+            GradeResultAndTallyPassFail(operatorResponse, expectedResponse); // assesses if the bezel had any light leakage, pass/fail
             PostOperatorResponse(operatorResponse, expectedResponse);
 
             AudibleAlert();
             PostSubTestPassFailFooter();
             UpdateTestNameAndStatusFields("Finished");
+            await Task.Delay(600, cancellationToken);
         }
+
 
         //------------------------------------------- Section 4.5 -------------------------------------------
 
-        internal void Test11_TestBezelLighting()
-        {// Test for the bezel lighting.
-            SetUpTestSection("4. NVG Mode", "4.5.", "Bezel Lighting");
+        internal async Task Test11_TestBezelLightingAsync(CancellationToken cancellationToken)
+        { 
+            SetUpTestSection("4. NVG Mode", "4.5.", "Bezel Lighting", cancellationToken);
 
             _unitsOfMeasure = "---";
 
@@ -505,27 +574,39 @@ namespace CIGALHE.MFD.Optical
             }
             if (_supplementalLightState == Power.ON) SwitchSupplementalLight(Power.OFF);
 
-            
-            Popup.Show("Set MFD to display WHITE, in NVG mode and minimum brightness (BRT = 1).\n\n" +
-                       "(Temporarily cover PC monitor to help see minimum brightness.)",
-                        title: "White - NVG Mode",
-                        MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
-                        imagePopupTitle: "CIGALHE MFD Bezel");
+            if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                await Task.Run(() => Popup.Show("Set MFD to display WHITE, in NVG mode and minimum brightness (LUM = 1).\n\n" +
+                                          "(Temporarily cover PC monitor to help see minimum brightness.)",
+                                           title: "White - NVG Mode",
+                                           MessageBoxButtons.OK, imageFile: ImagesFolder + "ROSE Bezel Buttons - All Functions.png",
+                                           imagePopupTitle: "ROSE MFD Bezel"), cancellationToken);
+                _uutMediumBrightness = false;
+            }
+            else
+            {
+                await Task.Run(() => Popup.Show("Set MFD to display WHITE, in NVG mode and minimum brightness (LUM = 1).\n\n" +
+                                           "(Temporarily cover PC monitor to help see minimum brightness.)",
+                                            title: "White - NVG Mode",
+                                            MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
+                                            imagePopupTitle: "CIGALHE MFD Bezel"), cancellationToken);
+            }
             _uutMediumBrightness = false;
 
-            
             PromptUserToAdjustBezelBacklighting();
 
             AudibleAlert();
             PostSubTestPassFailFooter();
             UpdateTestNameAndStatusFields("Finished");
+            await Task.Delay(600, cancellationToken);
         }
+
 
         //------------------------------------------- Section 4.6 -------------------------------------------
         //Test 12
-        internal void Test12_BezelBacklightingTest()
-        {
-            SetUpTestSection("4. NVG Mode", "4.6", "Bezel Backlighting");
+        internal async Task Test12_BezelBacklightingTestAsync(CancellationToken cancellationToken)
+        { 
+            SetUpTestSection("4. NVG Mode", "4.6", "Bezel Backlighting", cancellationToken);
             if (_tiltTableAngle != TiltTableAngle.NormalToUser)
             {
                 SwitchSupplementalLight(Power.ON);
@@ -535,9 +616,9 @@ namespace CIGALHE.MFD.Optical
 
             //bezel backlighting test
             // Show a popup to the user instructing them to verify and adjust the bezel backlighting voltage
-            
-            Popup.Show("Verify bezel backlighting voltage is 28 V and adjust if necessary.\n",
-                           title: "Maximum Bezel Backlighting");
+
+            await Task.Run(() => Popup.Show("Verify bezel backlighting voltage is 28 V and adjust if necessary.\n",
+                               title: "Maximum Bezel Backlighting"), cancellationToken);
 
             DecreaseBezelBacklighting();
             CheckBacklightingDecreaseUniformity();
@@ -548,41 +629,65 @@ namespace CIGALHE.MFD.Optical
             AudibleAlert();
             PostSubTestPassFailFooter();
             UpdateTestNameAndStatusFields("Finished");
-           
+            await Task.Delay(600, cancellationToken);
         }
+
         //------------------------------------------- Section 4.7 -------------------------------------------
 
-        internal void Test13_TestPowerLED() 
-        {// test to check the power led 
-            SetUpTestSection("4. NVG Mode", "4.7.", "Power LED");
+        internal async Task Test13_TestPowerLEDAsync(CancellationToken cancellationToken)
+        { 
+            SetUpTestSection("4. NVG Mode", "4.7.", "Power LED", cancellationToken);
 
             if (_tiltTableAngle != TiltTableAngle.NormalToUser)
             {
                 SwitchSupplementalLight(Power.ON);
                 SetTiltTableNormalToUser();
             }
-
-            
-            Popup.Show("Set MFD to display BLACK, in NVG mode.\n\n" +
-                       "(When running the full test, one press of bezel button S23 will do it.)",
-                        title: "Black - NVG Mode", msgBoxButtons: MessageBoxButtons.OK,
-                        imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
-                        imagePopupTitle: "CIGALHE MFD Bezel");
+            if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                await Task.Run(() => Popup.Show("Set MFD to display BLACK, in NVG mode.\n\n" +
+                                           "(When running the full test, one press of bezel button S23 will do it.)",
+                                            title: "Black - NVG Mode", msgBoxButtons: MessageBoxButtons.OK,
+                                            imageFile: ImagesFolder + "ROSE Bezel Buttons - All Functions.png",
+                                            imagePopupTitle: "ROSE MFD Bezel"), cancellationToken);
+            }
+            else
+            {
+                await Task.Run(() => Popup.Show("Set MFD to display BLACK, in NVG mode.\n\n" +
+                                          "(When running the full test, one press of bezel button S23 will do it.)",
+                                           title: "Black - NVG Mode", msgBoxButtons: MessageBoxButtons.OK,
+                                           imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
+                                           imagePopupTitle: "CIGALHE MFD Bezel"), cancellationToken);
+            }
+               
             if (_supplementalLightState == Power.ON) SwitchSupplementalLight(Power.OFF);
 
             _unitsOfMeasure = "---";
             string prompt1, prompt2, prompt3;
             DialogResult operatorResponse;
             DialogResult expectedResponse = DialogResult.Yes;
-            Thread.Sleep(600);
-            
-            prompt1 = "1. Click the Help icon (above right) to display a picture of the MFD bezel.\n" +
-                      "2. On the MFD bezel, press the Mode button (S19) repeatedly to toggle through Day, Night and NVG modes.";
-            prompt2 = "Did the Power LED change in brightness each time S19 was pressed?";
-            PostUserPromptToTestResults("   " + prompt2, doubleSpaced: true);
-            operatorResponse = Popup.Show(prompt1 + "\n\n" + prompt2, "Power LED", MessageBoxButtons.YesNo,
-                                          imageFile: ImagesFolder + "MFD Bezel Buttons - Change Mode.png",
-                                          imagePopupTitle: "CIGALHE MFD Bezel");
+            await Task.Delay(600, cancellationToken);
+
+            if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                prompt1 = "1. Click the Help icon (above right) to display a picture of the MFD bezel.\n" +
+                     "2. On the MFD bezel, press the Mode button (S19) repeatedly to toggle through Day, Night and NVG modes.";
+                prompt2 = "Did the Power LED change in brightness each time S19 was pressed?";
+                PostUserPromptToTestResults("   " + prompt2, doubleSpaced: true);
+                operatorResponse = await Task.Run(() => Popup.Show(prompt1 + "\n\n" + prompt2, "Power LED", MessageBoxButtons.YesNo,
+                                                             imageFile: ImagesFolder + "ROSE Bezel Buttons - All Functions.png",
+                                                             imagePopupTitle: "ROSE MFD Bezel"), cancellationToken);
+            }
+            else
+            {
+                prompt1 = "1. Click the Help icon (above right) to display a picture of the MFD bezel.\n" +
+                          "2. On the MFD bezel, press the Mode button (S19) repeatedly to toggle through Day, Night and NVG modes.";
+                prompt2 = "Did the Power LED change in brightness each time S19 was pressed?";
+                PostUserPromptToTestResults("   " + prompt2, doubleSpaced: true);
+                operatorResponse = await Task.Run(() => Popup.Show(prompt1 + "\n\n" + prompt2, "Power LED", MessageBoxButtons.YesNo,
+                                                              imageFile: ImagesFolder + "MFD Bezel Buttons - Change Mode.png",
+                                                              imagePopupTitle: "CIGALHE MFD Bezel"), cancellationToken);
+            }
             PostHeader(ReceivedExpectedHeader);
             GradeResultAndTallyPassFail(operatorResponse, expectedResponse); //checks if the response is the expected response (pass/fail)
             PostOperatorResponse(operatorResponse, expectedResponse); // prints result
@@ -590,13 +695,15 @@ namespace CIGALHE.MFD.Optical
             AudibleAlert();
             PostSubTestPassFailFooter();
             UpdateTestNameAndStatusFields("Finished");
+            await Task.Delay(600, cancellationToken);
         }
+
 
         //------------------------------------------- Section 5.1 -------------------------------------------
 
-        internal void Test14_TestPowerOff() 
-        {// test the power off
-            SetUpTestSection("5. Power Off", "5.1.", "Power Off");
+        internal async Task Test14_TestPowerOffAsync(CancellationToken cancellationToken)
+        { 
+            SetUpTestSection("5. Power Off", "5.1.", "Power Off", cancellationToken);
 
             _unitsOfMeasure = "---";
             DialogResult expectedResponse = DialogResult.Yes;
@@ -604,13 +711,12 @@ namespace CIGALHE.MFD.Optical
 
             TurnOffMFDPowerSupply();
 
-            
-            Popup.Show("On the Topward 3306D Power Supply, turn the VOLTAGE knob all the way counterclockwise (minimum).\n",
-                        title: "Minimize Bezel Backlighting Voltage");
+            await Task.Run(() => Popup.Show("On the Topward 3306D Power Supply, turn the VOLTAGE knob all the way counterclockwise (minimum).\n",
+                                            title: "Minimize Bezel Backlighting Voltage"), cancellationToken);
 
             string prompt = "Did the MFD display and bezel buttons backlighting turn off?";
             PostUserPromptToTestResults("   " + prompt, doubleSpaced: true);
-            operatorResponse = Popup.Show(prompt, "Power Off MFD", MessageBoxButtons.YesNo);
+            operatorResponse = await Task.Run(() => Popup.Show(prompt, "Power Off MFD", MessageBoxButtons.YesNo), cancellationToken);
             PostHeader(ReceivedExpectedHeader);
             GradeResultAndTallyPassFail(operatorResponse, expectedResponse); //checks if the response is the expected response (pass/fail)
             PostOperatorResponse(operatorResponse, expectedResponse); //prints result
@@ -618,7 +724,9 @@ namespace CIGALHE.MFD.Optical
             AudibleAlert();
             PostSubTestPassFailFooter();
             UpdateTestNameAndStatusFields("Finished");
+            await Task.Delay(600, cancellationToken);
         }
+
 
         /*************************************************************************************************************/
 
@@ -662,35 +770,71 @@ namespace CIGALHE.MFD.Optical
         }
 
         private void PromptUserToDisplayColorBars()
-        {
-            // Show a popup to the user instructing them to display the color bar pattern on the MFD
-            Popup.Show("Simultaneously press S24 and S7 bezel buttons to display color bar pattern on MFD.\n\n" +
-                       "          (Click the blue Help button at upper right to view bezel diagram.)",
-                        title: "Display Color Bars", msgBoxButtons: MessageBoxButtons.OK,
-                        imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
-                        imagePopupTitle: "CIGALHE MFD Bezel");
-            Thread.Sleep(600);
+        { // Show a popup to the user instructing them to display the color bar pattern on the MFD
+            if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                Popup.Show("Simultaneously press S24 and S7 bezel buttons to display color bar pattern on MFD.\n\n" +
+                      "          (Click the blue Help button at upper right to view bezel diagram.)",
+                       title: "Display Color Bars", msgBoxButtons: MessageBoxButtons.OK,
+                       imageFile: ImagesFolder + "ROSE Bezel Buttons - All Functions.png", 
+                       imagePopupTitle: "ROSE MFD Bezel");
+                Thread.Sleep(600);
+            }
+            else
+            {
+                Popup.Show("Simultaneously press S24 and S7 bezel buttons to display color bar pattern on MFD.\n\n" +
+                      "          (Click the blue Help button at upper right to view bezel diagram.)",
+                       title: "Display Color Bars", msgBoxButtons: MessageBoxButtons.OK,
+                       imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
+                       imagePopupTitle: "CIGALHE MFD Bezel");
+                Thread.Sleep(600);
+            }
+           
         }
 
         private void PromptUserToSetDayMode()
         {
             // Show a popup to the user instructing them to set the MFD to Day mode
-            Popup.Show("Set MFD to Day mode by pressing bezel button S19 until the Power On LED\n" +
-                       "in the upper left corner of the bezel is brightest.\n\n" +
-                       "          (Click the blue Help button at upper right to view bezel diagram.)",
-                        title: "IMPORTANT - Set Day Mode", msgBoxButtons: MessageBoxButtons.OK,
-                        imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
-                        imagePopupTitle: "CIGALHE MFD Bezel");
+            if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                Popup.Show("Set MFD to Day mode by pressing bezel button S19 until the Power On LED\n" +
+                      "in the upper left corner of the bezel is brightest.\n\n" +
+                      "          (Click the blue Help button at upper right to view bezel diagram.)",
+                       title: "IMPORTANT - Set Day Mode", msgBoxButtons: MessageBoxButtons.OK,
+                       imageFile: ImagesFolder + "ROSE Bezel Buttons - All Functions.png",
+                       imagePopupTitle: "ROSE MFD Bezel");
+            }
+            else
+            {
+                Popup.Show("Set MFD to Day mode by pressing bezel button S19 until the Power On LED\n" +
+                                       "in the upper left corner of the bezel is brightest.\n\n" +
+                                       "          (Click the blue Help button at upper right to view bezel diagram.)",
+                                        title: "IMPORTANT - Set Day Mode", msgBoxButtons: MessageBoxButtons.OK,
+                                        imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
+                                        imagePopupTitle: "CIGALHE MFD Bezel");
+            }
+                
         }
 
         private void PromptUserToTurnOffBacklighting()
         {
             // Show a popup to the user instructing them to turn off the LCD backlighting
-            Popup.Show("Set MFD to Day mode and BLACK test pattern.\n\n" +
+            if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                Popup.Show("Set MFD to Day mode and BLACK test pattern.\n\n" +
                        "Press and hold LUM\u2212 bezel button until LCD backlighting is off.\n" +
-                       "(BRT = 0).", title: "LCD Backlighting Off",
+                       "(LUM = 0).", title: "LCD Backlighting Off",
+                        msgBoxButtons: MessageBoxButtons.OK, imageFile: ImagesFolder + "ROSE Bezel Buttons - All Functions.png",
+                        imagePopupTitle: "ROSE MFD Bezel"); 
+            }
+            else
+            {
+                Popup.Show("Set MFD to Day mode and BLACK test pattern.\n\n" +
+                       "Press and hold LUM\u2212 bezel button until LCD backlighting is off.\n" +
+                       "(LUM = 0).", title: "LCD Backlighting Off",
                         msgBoxButtons: MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
                         imagePopupTitle: "CIGALHE MFD Bezel");
+            }
             _uutMediumBrightness = false;
 
             // Turn on the supplemental light source if it is off
@@ -834,16 +978,16 @@ namespace CIGALHE.MFD.Optical
                 "Failed within 3 cm", pfReceived, "No", _unitsOfMeasure, pfStatus), colorName: textColor);
         }
 
-        private void TestContrastAtMultipleAngles(List<KeyValuePair<string, int>> contrastRatios)
+        private async Task TestContrastAtMultipleAnglesAsync(List<KeyValuePair<string, int>> contrastRatios, CancellationToken cancellationToken)
         {
-            // Test contrast at multiple viewing angles
-            TestContrastAtOneAngle("+45", "+30", contrastRatios);
-            //AudibleAlert();
-            TestContrastAtOneAngle("+45", "-10", contrastRatios);
-            //AudibleAlert();
-            TestContrastAtOneAngle("-45", "-10", contrastRatios);
-            //AudibleAlert();
-            TestContrastAtOneAngle("-45", "+30", contrastRatios);
+            cancellationToken.ThrowIfCancellationRequested();
+            await TestContrastAtOneAngleAsync("+45", "+30", contrastRatios, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            await TestContrastAtOneAngleAsync("+45", "-10", contrastRatios, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            await TestContrastAtOneAngleAsync("-45", "-10", contrastRatios, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            await TestContrastAtOneAngleAsync("-45", "+30", contrastRatios, cancellationToken);
         }
 
         private void PostContrastResults(List<KeyValuePair<string, int>> contrastRatios)
@@ -858,15 +1002,23 @@ namespace CIGALHE.MFD.Optical
             // Grade and post results for each contrast ratio
             foreach (var contrast in contrastRatios)
             {
-                GradeResultAndTallyPassFail(contrast.Value, ContrastRatioLowerLimit, ContrastRatioUpperLimit);
-                PostMeasurement(MeasurementFormatInt, contrast.Key, contrast.Value, ContrastRatioLowerLimit, ContrastRatioUpperLimit);
+                if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+                {
+                    GradeResultAndTallyPassFail(contrast.Value, ContrastRatioLowerLimit, ContrastRatioUpperLimitRose);
+                    PostMeasurement(MeasurementFormatInt, contrast.Key, contrast.Value, ContrastRatioLowerLimit, ContrastRatioUpperLimitRose);
+                }
+                else
+                {
+                    GradeResultAndTallyPassFail(contrast.Value, ContrastRatioLowerLimit, ContrastRatioUpperLimit);
+                    PostMeasurement(MeasurementFormatInt, contrast.Key, contrast.Value, ContrastRatioLowerLimit, ContrastRatioUpperLimit);
+                }
             }
         }
 
-        private void TestBrightness(string level, string description)
+        private async Task TestBrightnessAsync(string level, string description, bool playProgressSound, CancellationToken cancellationToken )
         {
             // Test the center brightness at the specified level and description
-            TestCenterBrightness(level, description);
+            await TestCenterBrightnessAsync(level, description, playProgressSound, cancellationToken);
 
             // Set medium brightness flag to false
             _uutMediumBrightness = false;
@@ -923,48 +1075,81 @@ namespace CIGALHE.MFD.Optical
 
             // Calculate and post homogeneity results
             double Hf = luminanceMin / luminanceMax;
-            GradeResultAndTallyPassFail(Hf, LuminanceHomogeneityLowerLimit, LuminanceHomogeneityUpperLimit, includeLimits: "[)");
-            _unitsOfMeasure = "---";
-            PostMeasurement(MeasurementFormatDbl2, "Homogeneity", Hf, LuminanceHomogeneityLowerLimit, LuminanceHomogeneityUpperLimit);
+            if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                GradeResultAndTallyPassFail(Hf, LuminanceHomogeneityLowerLimitRose, LuminanceHomogeneityUpperLimit, includeLimits: "[]");
+                _unitsOfMeasure = "---";
+                PostMeasurement(MeasurementFormatDbl2, "Homogeneity", Hf, LuminanceHomogeneityLowerLimit, LuminanceHomogeneityUpperLimit);
+            }
+            else
+            {
+                GradeResultAndTallyPassFail(Hf, LuminanceHomogeneityLowerLimit, LuminanceHomogeneityUpperLimit, includeLimits: "[)");
+                _unitsOfMeasure = "---";
+                PostMeasurement(MeasurementFormatDbl2, "Homogeneity", Hf, LuminanceHomogeneityLowerLimit, LuminanceHomogeneityUpperLimit);
+            }
         }
 
-        private void TestColorCoordinatesAtMultipleSpots_Day()
+        private async Task TestColorCoordinatesAtMultipleSpots_DayAsync(CancellationToken cancellationToken)
         {
             // Test color coordinates at multiple spots in Day mode
-            TestColorCoordinatesAtOneSpot_Day(testPoint: "#5", position: _XYTable.LCD_middleCenterViewingSpot);
-            PostBlankLine();
-            TestColorCoordinatesAtOneSpot_Day(testPoint: "#3", position: _XYTable.LCD_topRightViewingSpot);
-            PostBlankLine();
-            TestColorCoordinatesAtOneSpot_Day(testPoint: "#1", position: _XYTable.LCD_topLeftViewingSpot);
-            PostBlankLine();
-            TestColorCoordinatesAtOneSpot_Day(testPoint: "#7", position: _XYTable.LCD_bottomLeftViewingSpot);
-            PostBlankLine();
-            TestColorCoordinatesAtOneSpot_Day(testPoint: "#9", position: _XYTable.LCD_bottomRightViewingSpot);
+            if(lblUUTPartNo.Text == " MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                await TestColorCoordinatesAtOneSpotAsync_Day(testPoint: "#5", position: _XYTable.LCD_middleCenterViewingSpot, cancellationToken);
+                PostBlankLine();
+                await TestColorCoordinatesAtOneSpotAsync_Day(testPoint: "#3", position: _XYTable.LCD_topRightViewingSpot_Rose, cancellationToken);
+                PostBlankLine();
+                await TestColorCoordinatesAtOneSpotAsync_Day(testPoint: "#1", position: _XYTable.LCD_topLeftViewingSpot_Rose, cancellationToken);
+                PostBlankLine();
+                await TestColorCoordinatesAtOneSpotAsync_Day(testPoint: "#7", position: _XYTable.LCD_bottomLeftViewingSpot_Rose, cancellationToken);
+                PostBlankLine();
+                await TestColorCoordinatesAtOneSpotAsync_Day(testPoint: "#9", position: _XYTable.LCD_bottomRightViewingSpot_Rose, cancellationToken);
+            }
+            else
+            {
+                await TestColorCoordinatesAtOneSpotAsync_Day(testPoint: "#5", position: _XYTable.LCD_middleCenterViewingSpot, cancellationToken);
+                PostBlankLine();
+                await TestColorCoordinatesAtOneSpotAsync_Day(testPoint: "#3", position: _XYTable.LCD_topRightViewingSpot, cancellationToken);
+                PostBlankLine();
+                await TestColorCoordinatesAtOneSpotAsync_Day(testPoint: "#1", position: _XYTable.LCD_topLeftViewingSpot, cancellationToken);
+                PostBlankLine();
+                await TestColorCoordinatesAtOneSpotAsync_Day(testPoint: "#7", position: _XYTable.LCD_bottomLeftViewingSpot, cancellationToken);
+                PostBlankLine();
+                await TestColorCoordinatesAtOneSpotAsync_Day(testPoint: "#9", position: _XYTable.LCD_bottomRightViewingSpot, cancellationToken);
+            }
+            
         }
 
-        private void PostChromaUniformityResults()
+        private async Task PostChromaUniformityResultsAsync(CancellationToken cancellationToken)
         {
+
             // Post blank lines and header for chroma uniformity results
             PostLineOfText("\n\n\nCheck Chroma Uniformity:\n", bold: true, underline: true);
             PostHeader(MeasurementHeader);
 
             // Test and post chroma uniformity results for each color in Day mode
-            TestChromaUniformity(TestColor.White_Day, ChromaUniformityWhiteLowerLimit, ChromaUniformityWhiteUpperLimit);
-            TestChromaUniformity(TestColor.Red_Day, ChromaUniformityRedLowerLimit, ChromaUniformityRedUpperLimit);
-            TestChromaUniformity(TestColor.Green_Day, ChromaUniformityGreenLowerLimit, ChromaUniformityGreenUpperLimit);
-            TestChromaUniformity(TestColor.Blue_Day, ChromaUniformityBlueLowerLimit, ChromaUniformityBlueUpperLimit);
+            await TestChromaUniformityAsync(TestColor.White_Day, ChromaUniformityWhiteLowerLimit, ChromaUniformityWhiteUpperLimit, cancellationToken);
+            await TestChromaUniformityAsync(TestColor.Red_Day, ChromaUniformityRedLowerLimit, ChromaUniformityRedUpperLimit, cancellationToken);
+            await TestChromaUniformityAsync(TestColor.Green_Day, ChromaUniformityGreenLowerLimit, ChromaUniformityGreenUpperLimit, cancellationToken);
+            await TestChromaUniformityAsync(TestColor.Blue_Day, ChromaUniformityBlueLowerLimit, ChromaUniformityBlueUpperLimit, cancellationToken);
         }
 
         private void PromptUserToDisplayWhiteNVG()
         {
             // Show a popup to the user instructing them to display white in NVG mode at maximum brightness
-            Popup.Show("Set MFD to display WHITE, in NVG mode and maximum brightness (BRT = 127).", "Display White",
+            if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                Popup.Show("Set MFD to display WHITE, in NVG mode and maximum brightness (LUM = 127).", "Display White",
+                      MessageBoxButtons.OK, imageFile: ImagesFolder + "ROSE Bezel Buttons - All Functions.png",
+                      imagePopupTitle: "ROSE MFD Bezel");
+            }
+            else
+            {
+                Popup.Show("Set MFD to display WHITE, in NVG mode and maximum brightness (LUM = 127).", "Display White",
                        MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
                        imagePopupTitle: "CIGALHE MFD Bezel");
-
+            }
             // Set medium brightness flag to false
             _uutMediumBrightness = false;
-
 
             // Turn off the light and cover the monitor
             AudibleAlert();
@@ -976,47 +1161,61 @@ namespace CIGALHE.MFD.Optical
             // If the white reading is too bright, show an alert and take a new measurement
             if (whiteReading.Lv > 2 * BrightnessNVGMaxUpperLimit)
             {
-                // AudibleAlert();
-                Popup.Show("Display is too bright.  Check that MFD is in NVG mode, then set to maximum brightness.", "Not in NVG Mode");
+
+                Popup.Show("Display is too bright.  Check that Display is in NVG mode, then set to maximum brightness.", "Not in NVG Mode");
                 TurnOffLightAndCoverMonitor();
                 whiteReading = _ChromaMeter.TakeMeasurement();
             }
         }
 
-        private void TestBrightnessNVG()
+        private async Task TestBrightnessNVGAsync(CancellationToken cancellationToken)
         {
             PostLineOfText("\n\n" + "   Minimum - Center-of-Display, Normal Incidence:\n", bold: true);
-            // AudibleAlert();
 
             // Show a popup to the user instructing them to display white in NVG mode at minimum brightness
             AudibleAlert();
-            Popup.Show("Set MFD to display WHITE, in NVG mode and minimum brightness (BRT = 1).\n\n" +
+            if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                Popup.Show("Set MFD to display WHITE, in NVG mode and minimum brightness (LUM = 1).\n\n" +
+                       "(Temporarily cover PC monitor to help see minimum brightness.)",
+                       title: "White - NVG Mode",
+                       MessageBoxButtons.OK, imageFile: ImagesFolder + "ROSE Bezel Buttons - All Functions.png",
+                       imagePopupTitle: "ROSE MFD Bezel");
+            }
+            else
+            {
+                Popup.Show("Set MFD to display WHITE, in NVG mode and minimum brightness (LUM = 1).\n\n" +
                        "(Temporarily cover PC monitor to help see minimum brightness.)",
                        title: "White - NVG Mode",
                        MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
                        imagePopupTitle: "CIGALHE MFD Bezel");
-
+            }
             // Set medium brightness flag to false
             _uutMediumBrightness = false;
 
             // Turn off the light and cover the monitor, then take a new measurement
             AudibleAlert();
             TurnOffLightAndCoverMonitor("NOTE: The following measurement can take up to 60 seconds.");
-            LightReading whiteReading = _ChromaMeter.TakeMeasurement();
+            await TakeLightReadingWithConditionalProgressSoundAsync(TestColor.White_NVG, "#5", true, cancellationToken);
+
+            // Retrieve the light reading from the measurements
+            LightReading whiteReading = _measurements[TestColor.White_NVG]["#5"];
 
             // Post the measurement result and grade the result
             PostHeader(MeasurementHeader);
             GradeResultAndTallyPassFail(whiteReading.Lv, BrightnessNVGMinLowerLimit, BrightnessNVGMinUpperLimit, includeLimits: "[)");
             PostMeasurement(MeasurementFormatDbl3, " ", whiteReading.Lv, BrightnessNVGMinLowerLimit, BrightnessNVGMinUpperLimit);
         }
+
+
         private void DecreaseBezelBacklighting()
         {
-            
             Popup.Show("Slowly lower the voltage until the bezel button backlighting turns off (below 10 V).\n\n" +
                        "    (Cover PC monitor while observing the bezel and press Enter key when done.)",
                        title: "Decrease Bezel Backlighting", disableButton: true);
             Thread.Sleep(600);
         }
+
         private void CheckBacklightingDecreaseUniformity()
         {
             string prompt = "Did the backlighting of the bezel buttons DECREASE uniformly from full brightness to none?";
@@ -1030,9 +1229,9 @@ namespace CIGALHE.MFD.Optical
             PostBlankLines(numLines: 2);
             Thread.Sleep(600);
         }
+
         private void IncreaseBezelBacklighting()
         {
-            
             Popup.Show("Now, slowly increase the voltage up to 28 V while observing the bezel button backlighting.\n\n" +
                        "    (Cover PC monitor while observing the bezel and press Enter key when done.)",
                        title: "Increase Bezel Backlighting", disableButton: true);
@@ -1093,10 +1292,22 @@ namespace CIGALHE.MFD.Optical
             prompt2 = "Are all bezel legends illuminated uniformly?";
             prompt3 = "  (Cover PC monitor while observing the bezel.)";
             PostUserPromptToTestResults("   " + prompt2, doubleSpaced: true);
-            operatorResponse = Popup.Show(prompt1 + "\n\n" + prompt2 + "\n\n" + prompt3,
+            if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                operatorResponse = Popup.Show(prompt1 + "\n\n" + prompt2 + "\n\n" + prompt3,
+                                          title: "Bezel Legends", MessageBoxButtons.YesNo,
+                                          imageFile: ImagesFolder + "ROSE Bezel Buttons - Legends.png",
+                                          imagePopupTitle: "Bezel Legends");
+
+            }
+            else
+            {
+                operatorResponse = Popup.Show(prompt1 + "\n\n" + prompt2 + "\n\n" + prompt3,
                                           title: "Bezel Legends", MessageBoxButtons.YesNo,
                                           imageFile: ImagesFolder + "MFD Bezel Buttons - Legends.png",
                                           imagePopupTitle: "Bezel Legends");
+            }
+            
 
             // Post header and result for bezel legends examination
             PostHeader(ReceivedExpectedHeader);
@@ -1118,10 +1329,11 @@ namespace CIGALHE.MFD.Optical
             Thread.Sleep(600);
         }
 
-
-        private void SetUpTestSection(string task, string section, string testName)
+        private void SetUpTestSection(string task, string section, string testName, CancellationToken cancellationToken)
         {
-            // Set the task, section, and test name
+            cancellationToken.ThrowIfCancellationRequested(); 
+
+            // Sets the task, section, and test name
             _task = task;
             _testSection = section;
             _testName = testName;
@@ -1164,8 +1376,8 @@ namespace CIGALHE.MFD.Optical
             return Lv;
         }
 
-        private void AdjustUUTtoMediumBrightness(Mode mode)
-        {//prompts user to set brightness to medium
+        private async Task AdjustUUTtoMediumBrightnessAsync(Mode mode, CancellationToken cancellationToken = default)
+        {
             if (_uutMediumBrightness == false)
             {
                 string strMode = mode.ToString();
@@ -1173,12 +1385,22 @@ namespace CIGALHE.MFD.Optical
                 if (_supplementalLightState == Power.OFF) SwitchSupplementalLight(Power.ON);
                 SetTiltTableNormal();
 
-                _XYTable.MoveToPosition(_XYTable.LCD_middleCenterViewingSpot);
-                
-                Popup.Show($"Set MFD to display WHITE, in {strMode} mode and medium brightness (approximate).",
-                            title: $"White - {strMode} Mode",
-                            MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
-                            imagePopupTitle: "CIGALHE MFD Bezel");
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_middleCenterViewingSpot, cancellationToken).ConfigureAwait(false);
+
+                if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+                {
+                    Popup.Show($"Set MFD to display WHITE, in {strMode} mode and medium brightness (approximate).",
+                           title: $"White - {strMode} Mode",
+                           MessageBoxButtons.OK, imageFile: ImagesFolder + "ROSE Bezel Buttons - All Functions.png",
+                           imagePopupTitle: "ROSE MFD Bezel");
+                }
+                else
+                {
+                    Popup.Show($"Set MFD to display WHITE, in {strMode} mode and medium brightness (approximate).",
+                           title: $"White - {strMode} Mode",
+                           MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
+                           imagePopupTitle: "CIGALHE MFD Bezel");
+                }
                 if (_supplementalLightState == Power.ON) SwitchSupplementalLight(Power.OFF);
                 AdjustUUTBrightnessAndPostValue("White", mode);
                 _uutMediumBrightness = true;
@@ -1410,7 +1632,7 @@ namespace CIGALHE.MFD.Optical
             SetPassFailStatusAndTallyPassFail(bTestPassed);
         }
 
-        private void GradeResultToUpperLimitAndTallyPassFail<T, U>(T testValue, U upperLimit, string includeLimits = ")")//IS THIS NEEDED??????????????
+        private void GradeResultToUpperLimitAndTallyPassFail<T, U>(T testValue, U upperLimit, string includeLimits = ")") //method never called
         {//checks if value is within the specified range of upper limit , exclusive and inclusive 
             double value = Convert.ToDouble(testValue);
             double uprLimit = Convert.ToDouble(upperLimit);
@@ -1502,7 +1724,6 @@ namespace CIGALHE.MFD.Optical
         {//prompts user to set the tilt table normal to the chromameter
             if (_tiltTableAngle != TiltTableAngle.Normal)
             {
-                
                 Popup.Show(PopupPromptTiltTableNormal, PopupTitleTiltTableNormal);
                 _tiltTableAngle = TiltTableAngle.Normal;
             }
@@ -1512,7 +1733,6 @@ namespace CIGALHE.MFD.Optical
         { //prompts user to add wedge 
             if (_tiltTableAngle != TiltTableAngle.NormalToUser)
             {
-                
                 Popup.Show(PopupPromptTiltTableNormalToUser, title: PopupTitleTiltTableNormalToUser,
                            msgBoxButtons: MessageBoxButtons.OK,
                            imageFile: ImagesFolder + "TiltTableNormalToUserWedgeInstructions.png",
@@ -1585,9 +1805,9 @@ namespace CIGALHE.MFD.Optical
             _supplementalLightState = onOffState;
         }
 
-        public void TakeLightReading(TestColor testColor, string point)
+        private async Task TakeLightReadingAsync(TestColor testColor, string point, CancellationToken cancellationToken)
         {
-            LightReading lightReading = _ChromaMeter.TakeMeasurement();
+            LightReading lightReading = await Task.Run(() => _ChromaMeter.TakeMeasurement(), cancellationToken);
 
             // Color correct non-white/black readings
             if (testColor != TestColor.White_Day && testColor != TestColor.Black_Day)
@@ -1605,40 +1825,72 @@ namespace CIGALHE.MFD.Optical
             }
         }
 
-        private void TakeLightReadingsFromNinePositions(TestColor testColor)
-        {//takes llight readings from 9 different positions on the display
+        private async Task TakeLightReadingsFromNinePositionsAsync(TestColor testColor, CancellationToken cancellationToken)
+        {
             _measurements = new SortedList<TestColor, SortedList<string, LightReading>>();
 
-            _XYTable.MoveToPosition(_XYTable.LCD_middleCenterViewingSpot);
-            TakeLightReading(testColor, "#5");
+            if(lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_middleCenterViewingSpot, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#5", cancellationToken);
 
-            _XYTable.MoveToPosition(_XYTable.LCD_middleRightViewingSpot);
-            TakeLightReading(testColor, "#6");
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_middleRightViewingSpot_Rose, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#6", cancellationToken);
 
-            _XYTable.MoveToPosition(_XYTable.LCD_topRightViewingSpot);
-            TakeLightReading(testColor, "#3");
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_topRightViewingSpot_Rose, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#3", cancellationToken);
 
-            _XYTable.MoveToPosition(_XYTable.LCD_topCenterViewingSpot);
-            TakeLightReading(testColor, "#2");
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_topCenterViewingSpot_Rose, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#2", cancellationToken);
 
-            _XYTable.MoveToPosition(_XYTable.LCD_topLeftViewingSpot);
-            TakeLightReading(testColor, "#1");
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_topLeftViewingSpot_Rose, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#1", cancellationToken);
 
-            _XYTable.MoveToPosition(_XYTable.LCD_middleLeftViewingSpot);
-            TakeLightReading(testColor, "#4");
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_middleLeftViewingSpot_Rose, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#4", cancellationToken);
 
-            _XYTable.MoveToPosition(_XYTable.LCD_bottomLeftViewingSpot);
-            TakeLightReading(testColor, "#7");
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_bottomLeftViewingSpot_Rose, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#7", cancellationToken);
 
-            _XYTable.MoveToPosition(_XYTable.LCD_bottomCenterViewingSpot);
-            TakeLightReading(testColor, "#8");
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_bottomCenterViewingSpot_Rose, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#8", cancellationToken);
 
-            _XYTable.MoveToPosition(_XYTable.LCD_bottomRightViewingSpot);
-            TakeLightReading(testColor, "#9");
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_bottomRightViewingSpot_Rose, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#9", cancellationToken);
+            }
+            else
+            {
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_middleCenterViewingSpot, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#5", cancellationToken);
+
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_middleRightViewingSpot, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#6", cancellationToken);
+
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_topRightViewingSpot, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#3", cancellationToken);
+
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_topCenterViewingSpot, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#2", cancellationToken);
+
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_topLeftViewingSpot, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#1", cancellationToken);
+
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_middleLeftViewingSpot, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#4", cancellationToken);
+
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_bottomLeftViewingSpot, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#7", cancellationToken);
+
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_bottomCenterViewingSpot, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#8", cancellationToken);
+
+                await MoveToPositionWithSoundAsync(_XYTable.LCD_bottomRightViewingSpot, cancellationToken);
+                await TakeLightReadingAsync(testColor, "#9", cancellationToken);
+            }
         }
 
-        private void TestCenterBrightness(string brightnessLevel, string brightnessDescription)
-        {//tests the brightness of the center of the display
+        private async Task TestCenterBrightnessAsync(string brightnessLevel, string brightnessDescription, bool playProgressSound, CancellationToken cancellationToken)
+        {
             PostLineOfText($"   {brightnessLevel} - Center-of-Display, Normal Incidence:\n", bold: true);
             AudibleAlert();
             Popup.Show($"Set MFD to display WHITE, in Day mode and {brightnessDescription}.", "Display White");
@@ -1646,15 +1898,27 @@ namespace CIGALHE.MFD.Optical
             AudibleAlert();
             TurnOffLightAndCoverMonitor(alert);
 
-            LightReading whiteReading = _ChromaMeter.TakeMeasurement();
+            // Use the new method with conditional progress sound
+            await TakeLightReadingWithConditionalProgressSoundAsync(TestColor.White_Day, "Center", playProgressSound, cancellationToken);
+
+            // Assuming whiteReading is obtained inside TakeLightReadingWithConditionalProgressSoundAsync and you process it here
+            LightReading whiteReading = _measurements[TestColor.White_Day]["Center"];
 
             switch (brightnessLevel)
             {
                 case "Maximum":
                     {
-                        PostHeader(LowerLimitOnlyHeader);
-                        GradeResultToLowerLimitAndTallyPassFail((int)whiteReading.Lv, BrightnessDayNormalMaxLowerLimit);
-                        PostMeasurement(MeasurementLowerLimitDbl1Int, " ", whiteReading.Lv, BrightnessDayNormalMaxLowerLimit, null);
+                        PostHeader(MeasurementHeader);
+                        if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+                        {
+                            GradeResultAndTallyPassFail(whiteReading.Lv, BrightnessDayNormalMaxLowerLimit, BrightnessDayNormalMaxUpperLimit, includeLimits: "[)"); //Rose Upper& lower limit grading
+                            PostMeasurement(MeasurementFormatDbl3, " ", whiteReading.Lv, BrightnessDayNormalMaxLowerLimit, BrightnessDayNormalMaxUpperLimit);
+                        }
+                        else
+                        {
+                            GradeResultToLowerLimitAndTallyPassFail((int)whiteReading.Lv, BrightnessDayNormalMaxLowerLimit);
+                            PostMeasurement(MeasurementLowerLimitDbl1Int, " ", whiteReading.Lv, BrightnessDayNormalMaxLowerLimit, null);
+                        }
                     }
                     break;
                 case "Minimum":
@@ -1669,7 +1933,7 @@ namespace CIGALHE.MFD.Optical
             }
         }
 
-        private void TestChromaUniformity(TestColor testColor, double lowerLimit, double upperLimit)
+        private async Task TestChromaUniformityAsync(TestColor testColor, double lowerLimit, double upperLimit, CancellationToken cancellationToken)
         {
             double colorDistance, maxColorDistance = 0.0;
             double chromaUniformityLowerLimit = 0.0, chromaUniformityUpperLimit = 0.0;
@@ -1700,25 +1964,41 @@ namespace CIGALHE.MFD.Optical
             int n = 0;
             foreach (var measurement in _measurements[testColor])
             {
-                lightReadings[n++] = measurement.Value; //iterates through mesurements for each testColor and stores in lightreadings
+                lightReadings[n++] = measurement.Value; // iterates through measurements for each testColor and stores in lightReadings
             }
 
-            for (int i = 0; i < 4; i++)
+            await Task.Run(() =>
             {
-                for (int j = i + 1; j < 5; j++)
+                for (int i = 0; i < 4; i++)
                 {
-                    colorDistance = CalculateColorDistance(lightReadings[i], lightReadings[j]);
-                    if (colorDistance > maxColorDistance) maxColorDistance = colorDistance;
+                    for (int j = i + 1; j < 5; j++)
+                    {
+                        colorDistance = CalculateColorDistance(lightReadings[i], lightReadings[j]);
+                        if (colorDistance > maxColorDistance) maxColorDistance = colorDistance;
+                    }
                 }
-            } // calculates the disance between two color readings
+            }, cancellationToken); // calculates the distance between two color readings
+
             GradeResultAndTallyPassFail(maxColorDistance, chromaUniformityLowerLimit, chromaUniformityUpperLimit, includeLimits: "[)");
             string colorName = GetColorName(testColor);
             PostMeasurement(MeasurementFormatDbl3, "dRadius " + colorName, maxColorDistance,
                 chromaUniformityLowerLimit, chromaUniformityUpperLimit);
         }
 
-        private void TestContrastAtOneAngle(string horizAngle, string vertAngle, List<KeyValuePair<string, int>> contrastRatios)
-        {//instructs the user how to test the contrast
+
+        private async Task TestContrastAtOneAngleAsync(string horizAngle, string vertAngle, List<KeyValuePair<string, int>> contrastRatios, CancellationToken cancellationToken)
+        {
+            // Ensure _ChromaMeter and _XYTable are not null
+            if (_ChromaMeter == null)
+            {
+                throw new InvalidOperationException("_ChromaMeter is not initialized.testContras");
+            }
+
+            if (_XYTable == null)
+            {
+                throw new InvalidOperationException("_XYTable is not initialized. TestContrast");
+            }
+
             LightReading whiteReading;
             LightReading blackReading;
             int contrastRatio;
@@ -1728,80 +2008,140 @@ namespace CIGALHE.MFD.Optical
             Popup.Show($"Set tilt table: horizontal {horizAngle} degrees, vertical {vertAngle} degrees .", PopupTitleTiltTable);
             _tiltTableAngle = TiltTableAngle.Other;
             AudibleAlert();
-            Popup.Show("Set MFD to display WHITE, in Day mode and maximum brightness (BRT = 127).", "Display White",
+            if (lblUUTPartNo.Text == "MB1690A-20")
+            {
+                Popup.Show("Set MFD to display WHITE, in Day mode and maximum brightness (LUM = 127).", "Display White",
+                        MessageBoxButtons.OK, imageFile: ImagesFolder + "ROSE Bezel Buttons - All Functions.png",
+                        imagePopupTitle: "ROSE MFD Bezel");
+            }
+            else
+            {
+                Popup.Show("Set MFD to display WHITE, in Day mode and maximum brightness (LUM = 127).", "Display White",
                         MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
                         imagePopupTitle: "CIGALHE MFD Bezel");
+            }
             _uutMediumBrightness = false;
             AudibleAlert();
             TurnOffLightAndCoverMonitor();
-            whiteReading = _ChromaMeter.TakeMeasurement();
+            whiteReading = await Task.Run(() => _ChromaMeter.TakeMeasurement(), cancellationToken);
             AudibleAlert();
             _nonNormalMaxWhiteReadings.Add(whiteReading);    // Save for use later in Section 7.4 Brightness Range - Day
             PostLineOfText($"      White test pattern, measured brightness: {whiteReading.Lv}");
-            // AudibleAlert(); //might not be needed, alert after function returns, double check when alert should happen
-            
-            Popup.Show("Set MFD to display BLACK, in Day mode and maximum brightness (BRT = 127).", "Display Black",
-                        MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
-                        imagePopupTitle: "CIGALHE MFD Bezel");
-            string alert = vertAngle == "-10" ? "NOTE: The following measurement can take up to 60 seconds." : "";
+
+            if (lblUUTPartNo.Text == "MB1690A-20")
+            {
+                Popup.Show("Set MFD to display BLACK, in Day mode and maximum brightness (LUM = 127).", "Display Black",
+                        MessageBoxButtons.OK, imageFile: ImagesFolder + "ROSE Bezel Buttons - All Functions.png",
+                        imagePopupTitle: "ROSE MFD Bezel");
+            }
+            else
+            {
+                Popup.Show("Set MFD to display BLACK, in Day mode and maximum brightness (LUM = 127).", "Display Black",
+                       MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
+                       imagePopupTitle: "CIGALHE MFD Bezel");
+            }
+
+            string alert = vertAngle == "-10" ? "NOTE: The following measurement can take up to 60 seconds." : ""; // play progress sound
             AudibleAlert();
             TurnOffLightAndCoverMonitor(alert);
-            blackReading = _ChromaMeter.TakeMeasurement();
+
+            // Call the method to take the measurement
+            await TakeLightReadingWithConditionalProgressSoundAsync(TestColor.Black_Day, "Black", alert != "", cancellationToken);
+
+            // Retrieve the measurement from the dictionary
+            blackReading = _measurements[TestColor.Black_Day]["Black"];
+
             AudibleAlert();
             PostLineOfText($"      Black test pattern, measured brightness: {blackReading.Lv}");
             contrastRatio = Convert.ToInt32(whiteReading.Lv / blackReading.Lv);
             contrastRatios.Add(new KeyValuePair<string, int>($"H:{horizAngle,3}, V:{vertAngle,3} deg.", contrastRatio));
         }
 
-        private void TestColorCoordinatesAtOneSpot_Day(string testPoint)
-        {//test colors at multiple spots in day mode
+
+
+
+        private async Task TestColorCoordinatesAtOneSpotAsync_Day(string testPoint, CancellationToken cancellationToken)
+        {
             bool bPassed;
             string pfStatus;
             string textColor;
 
             PostLineOfText(String.Format($"\n\nColor Coordinates DAY mode - Point {testPoint}\n"), bold: true, underline: true);
 
-            // AudibleAlert();
             AudibleAlert();
-            Popup.Show("Set MFD to display WHITE, in Day mode and maximum brightness (BRT = 127).", "Display White",
+            if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                Popup.Show("Set MFD to display WHITE, in Day mode and maximum brightness (LUM = 127).", "Display White",
+                       MessageBoxButtons.OK, imageFile: ImagesFolder + "ROSE Bezel Buttons - All Functions.png",
+                       imagePopupTitle: "ROSE MFD Bezel");
+            }
+            else
+            {
+                Popup.Show("Set MFD to display WHITE, in Day mode and maximum brightness (LUM = 127).", "Display White",
                         MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
                         imagePopupTitle: "CIGALHE MFD Bezel");
+            }
             _uutMediumBrightness = false;
             AudibleAlert();
             TurnOffLightAndCoverMonitor();
-            TakeLightReading(TestColor.White_Day, testPoint);
+            await TakeLightReadingAsync(TestColor.White_Day, testPoint, cancellationToken);
             AudibleAlert();
 
-            // AudibleAlert();
-
-            Popup.Show("Set MFD to display RED, in Day mode and maximum brightness (BRT = 127).", "Display Red",
+            if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                Popup.Show("Set MFD to display RED, in Day mode and maximum brightness (LUM = 127).", "Display Red",
+                       MessageBoxButtons.OK, imageFile: ImagesFolder + "ROSE Bezel Buttons - All Functions.png",
+                       imagePopupTitle: "ROSE MFD Bezel");
+            }
+            else
+            {
+                Popup.Show("Set MFD to display RED, in Day mode and maximum brightness (LUM = 127).", "Display Red",
                         MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
                         imagePopupTitle: "CIGALHE MFD Bezel");
+            }
             _uutMediumBrightness = false;
             AudibleAlert();
             TurnOffLightAndCoverMonitor();
-            TakeLightReading(TestColor.Red_Day, testPoint);
+            await TakeLightReadingAsync(TestColor.Red_Day, testPoint, cancellationToken);
             AudibleAlert();
-            // AudibleAlert();
+            if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                Popup.Show("Set MFD to display GREEN, in Day mode and maximum brightness (LUM = 127).", "Display Green",
+                        MessageBoxButtons.OK, imageFile: ImagesFolder + "ROSE Bezel Buttons - All Functions.png",
+                        imagePopupTitle: "ROSE MFD Bezel");
+            }
+            else
+            { 
+                Popup.Show("Set MFD to display GREEN, in Day mode and maximum brightness (LUM = 127).", "Display Green",
+                       MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
+                       imagePopupTitle: "CIGALHE MFD Bezel");
+            }
+               
 
-            Popup.Show("Set MFD to display GREEN, in Day mode and maximum brightness (BRT = 127).", "Display Green",
-                        MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
-                        imagePopupTitle: "CIGALHE MFD Bezel");
-           
             _uutMediumBrightness = false;
             AudibleAlert();
             TurnOffLightAndCoverMonitor();
-            TakeLightReading(TestColor.Green_Day, testPoint);
+            await TakeLightReadingAsync(TestColor.Green_Day, testPoint, cancellationToken);
             AudibleAlert();
 
-            Popup.Show("Set MFD to display BLUE, in Day mode and maximum brightness (BRT = 127).", "Display Blue",
+            if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                Popup.Show("Set MFD to display BLUE, in Day mode and maximum brightness (LUM = 127).", "Display Blue",
+                        MessageBoxButtons.OK, imageFile: ImagesFolder + "ROSE Bezel Buttons - All Functions.png",
+                        imagePopupTitle: "ROSE MFD Bezel");
+            }
+            else
+            {
+                Popup.Show("Set MFD to display BLUE, in Day mode and maximum brightness (LUM = 127).", "Display Blue",
                         MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
                         imagePopupTitle: "CIGALHE MFD Bezel");
+            }
+                
             _uutMediumBrightness = false;
             AudibleAlert();
             TurnOffLightAndCoverMonitor();
-            TakeLightReading(TestColor.Blue_Day, testPoint);
-            
+            await TakeLightReadingAsync(TestColor.Blue_Day, testPoint, cancellationToken);
+
 
             bPassed = PostChromaticityTable_Day(testPoint);
             SetPassFailStatusAndTallyPassFail(bPassed);
@@ -1812,13 +2152,13 @@ namespace CIGALHE.MFD.Optical
             PostLineOfText(String.Format(ChromaPointStatusFormat, $"Point {testPoint}", pfStatus, "Pass", pfStatus), colorName: textColor);
         }
 
-        private void TestColorCoordinatesAtOneSpot_Day(string testPoint, XYPosition position)
+        private async Task TestColorCoordinatesAtOneSpotAsync_Day(string testPoint, XYPosition position, CancellationToken cancellationToken)
         {
-            _XYTable.MoveToPosition(position);
-            TestColorCoordinatesAtOneSpot_Day(testPoint);
+            await MoveToPositionWithSoundAsync(position, cancellationToken);
+            await TestColorCoordinatesAtOneSpotAsync_Day(testPoint, cancellationToken);
         }
 
-        private void TestColorCoordinatesAtOneSpot_NVG(string testPoint)
+        private async Task TestColorCoordinatesAtOneSpotAsync_NVG(string testPoint, CancellationToken cancellationToken)
         {//tests the chromacity of red and yellow in NVG mode
             bool bPassed;
             string pfStatus;
@@ -1826,26 +2166,40 @@ namespace CIGALHE.MFD.Optical
 
             PostLineOfText(String.Format($"\n\nColor Coordinates NVG mode - Point {testPoint}\n"), bold: true, underline: true);
 
-            // AudibleAlert();
-            
-            Popup.Show("Set MFD to display YELLOW, in NVG mode and maximum brightness (BRT = 127).", "Display Yellow",
-                        MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
-                        imagePopupTitle: "CIGALHE MFD Bezel");
+            if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                Popup.Show("Set MFD to display YELLOW, in NVG mode and maximum brightness (LUM = 127).", "Display Yellow",
+                        MessageBoxButtons.OK, imageFile: ImagesFolder + "ROSE Bezel Buttons - All Functions.png",
+                        imagePopupTitle: "ROSE MFD Bezel");
+            }
+            else
+            {
+                Popup.Show("Set MFD to display YELLOW, in NVG mode and maximum brightness (LUM = 127).", "Display Yellow",
+                       MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
+                       imagePopupTitle: "CIGALHE MFD Bezel");
+            }
+               
             _uutMediumBrightness = false;
             AudibleAlert();
             TurnOffLightAndCoverMonitor();
-            TakeLightReading(TestColor.Yellow_NVG, testPoint);
+            await TakeLightReadingAsync(TestColor.Yellow_NVG, testPoint, cancellationToken);
             AudibleAlert();
-
-            // AudibleAlert(); //might not need this alert i either remove it here or in the method its called (alert @ line 682)
-
-            Popup.Show("Set MFD to display RED, in NVG mode and maximum brightness (BRT = 127).", "Display Red",
+            if (lblUUTPartNo.Text == "MB1690A-20" || lblUUTPartNo.Text == "MB1690A-10")
+            {
+                Popup.Show("Set MFD to display RED, in NVG mode and maximum brightness (LUM = 127).", "Display Red",
+                       MessageBoxButtons.OK, imageFile: ImagesFolder + "ROSE Bezel Buttons - All Functions.png",
+                       imagePopupTitle: "ROSE MFD Bezel");
+            }
+            else
+            {
+                Popup.Show("Set MFD to display RED, in NVG mode and maximum brightness (LUM = 127).", "Display Red",
                         MessageBoxButtons.OK, imageFile: ImagesFolder + "MFD Bezel Buttons - All Functions.png",
                         imagePopupTitle: "CIGALHE MFD Bezel");
+            }
             _uutMediumBrightness = false;
             AudibleAlert();
-            TurnOffLightAndCoverMonitor("NOTE: The following measurement can take up to 60 seconds.");
-            TakeLightReading(TestColor.Red_NVG, testPoint);
+            TurnOffLightAndCoverMonitor("NOTE: The following measurement can take up to 60 seconds."); //play progress sound
+            await TakeLightReadingWithConditionalProgressSoundAsync(TestColor.Red_NVG, testPoint,true);
             AudibleAlert();
 
             bPassed = PostChromaticityTable_NVG(testPoint);
@@ -1877,5 +2231,158 @@ namespace CIGALHE.MFD.Optical
 
             _supplementalLightState = Power.OFF;
         }
+
+        private async Task MoveToPositionWithSoundAsync(XYPosition position, CancellationToken cancellationToken)
+        {
+            using (var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                var soundTask = Task.Run(() => PlaySoundLoop("Bird_in_Rain.wav", cts.Token), cts.Token);
+
+                // Move the chromameter to the specified position
+                await Task.Run(() => _XYTable.MoveToPosition(position, cts.Token), cts.Token);
+
+                // Cancel the sound task and wait for it to acknowledge the cancellation
+                cts.Cancel();
+
+                try
+                {
+                    if (!soundTask.Wait(TimeSpan.FromSeconds(10)))
+                    {
+                        throw new OperationCanceledException("Sound task did not complete within the expected time frame.");
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // Handle the cancellation exception if necessary
+                }
+            }
+        }
+
+
+        private async Task TakeLightReadingWithConditionalProgressSoundAsync(TestColor testColor, string point, bool playProgressSound = false, CancellationToken cancellationToken = default)
+        {
+            if (_ChromaMeter == null)
+            {
+                throw new InvalidOperationException("_ChromaMeter is not initialized.");
+            }
+
+            using (var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                Task soundTask = Task.CompletedTask;
+                if (playProgressSound)
+                {
+                    soundTask = Task.Run(() => PlaySoundLoop("Bird_in_Rain.wav", cts.Token), cts.Token);
+                }
+
+                try
+                {
+                    Task<LightReading> measurementTask = Task.Run(() => _ChromaMeter.TakeMeasurement(), cts.Token);
+                    Task timeoutTask = Task.Delay(TimeSpan.FromMinutes(2), cts.Token);
+
+                    Task completedTask = await Task.WhenAny(measurementTask, timeoutTask);
+
+                    if (completedTask == timeoutTask)
+                    {
+                        cts.Cancel();
+                        throw new TimeoutException("The chromameter measurement timed out after 2 minutes.");
+                    }
+
+                    LightReading lightReading = await measurementTask;
+
+                    if (playProgressSound)
+                    {
+                        _progressSoundPlayer?.Stop(); // Stop the sound immediately
+                        cts.Cancel();
+                        if (!soundTask.Wait(TimeSpan.FromSeconds(5)))
+                        {
+                            throw new OperationCanceledException("Sound task did not complete within the expected time frame.");
+                        }
+                    }
+
+                    // Color correct non-white/black readings
+                    if (testColor != TestColor.White_Day && testColor != TestColor.Black_Day)
+                        lightReading = _ColorCorrection.AdjustColor(testColor, lightReading);
+
+                    if (_measurements.ContainsKey(testColor))
+                    {
+                        _measurements[testColor].Add(point, lightReading);
+                    }
+                    else
+                    {
+                        var _pointsMeasurements = new SortedList<string, LightReading>();
+                        _pointsMeasurements.Add(point, lightReading);
+                        _measurements.Add(testColor, _pointsMeasurements);
+                    }
+                }
+                catch (TimeoutException tex)
+                {
+                    MessageBox.Show($"A timeout occurred: {tex.Message}", "Timeout Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+                catch (InvalidOperationException ioex)
+                {
+                    MessageBox.Show($"An invalid operation occurred: {ioex.Message}", "Invalid Operation", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                catch (Exception ex)
+                {
+                    // Handle any other exceptions
+                    MessageBox.Show($"An error occurred: {ex.Message}\n{ex.StackTrace}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                finally
+                {
+                    // Ensure the sound task is cancelled and awaited even if an exception occurs
+                    if (playProgressSound)
+                    {
+                        cts.Cancel();
+                        try
+                        {
+                            if (!soundTask.Wait(TimeSpan.FromSeconds(10)))
+                            {
+                                throw new OperationCanceledException("Sound task did not complete within the expected time frame.");
+                            }
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            // Handle the cancellation exception if necessary
+                        }
+                    }
+                }
+            }
+        }
+
+
+        private void PlaySoundLoop(string soundFile, CancellationToken token)
+        {
+            if (File.Exists(soundFile))
+            {
+                _progressSoundPlayer = new SoundPlayer(soundFile);
+                try
+                {
+                    while (!token.IsCancellationRequested)
+                    {
+                        _progressSoundPlayer.PlaySync();
+
+                        // Check for cancellation after each loop
+                        if (token.IsCancellationRequested)
+                        {
+                            _progressSoundPlayer.Stop();
+                            break;
+                        }
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // Handle the cancellation exception if necessary
+                }
+                finally
+                {
+                    _progressSoundPlayer.Stop(); // Ensure the sound stops if the token is canceled
+                }
+            }
+            else
+            {
+                MessageBox.Show($"Sound file {soundFile} not found.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
     }
 }
