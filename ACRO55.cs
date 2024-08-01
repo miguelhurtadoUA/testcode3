@@ -1,9 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Ports;
 using System.Threading;
 using System.Windows.Forms;
 using CS.Libraries.File.Initialization;
+
+
 
 namespace XYPositionSystem
 {
@@ -15,8 +18,14 @@ namespace XYPositionSystem
         const double LCD_height = 8.283;    // 210.4 mm on MFD drawings
         const double LCD_width  = 6.213;    // 157.8 mm on MFD drawings
 
+        const double LCD_height_Rose = 7.256;  // 184.3 mm on Rose drawings
+        const double LCD_width_Rose = 9.677;   // 245.8 mm on Rose drawings
+
         const double LCD_marginHoriz = 0.1 * LCD_width;
         const double LCD_marginVert  = 0.1 * LCD_height;
+
+        const double LCD_marginHoriz_Rose = 0.1 * LCD_width_Rose;
+        const double LCD_marginVert_Rose = 0.1 * LCD_height_Rose;
 
         /* THE POSITIONS DEFINED BELOW ARE FROM THE PERSPECTIVE OF THE X-Y TABLE.
          * The Y axis is the direction that the gantry moves back and forth (two stepper motors,
@@ -31,6 +40,7 @@ namespace XYPositionSystem
          * right corner (due to the 90 deg. rotation).
          */
 
+        //MFD
         const double LCD_topViewingSpots    = LCD_height - LCD_marginVert;
         const double LCD_middleViewingSpots = LCD_height * 0.5;
         const double LCD_bottomViewingSpots = 0.0 + LCD_marginVert;
@@ -39,8 +49,18 @@ namespace XYPositionSystem
         const double LCD_centerViewingSpots = LCD_width * 0.5;
         const double LCD_rightViewingSpots  = LCD_width - LCD_marginHoriz;
 
+        //Rose
+        const double LCD_topViewingSpots_Rose = LCD_height_Rose - LCD_marginVert_Rose;
+        const double LCD_middleViewingSpots_Rose = LCD_height_Rose * 0.5;
+        const double LCD_bottomViewingSpots_Rose = 0.0 + LCD_marginVert_Rose;
+
+        const double LCD_leftViewingSpots_Rose = 0.0 + LCD_marginHoriz_Rose;
+        const double LCD_centerViewingSpots_Rose = LCD_width_Rose * 0.5;
+        const double LCD_rightViewingSpots_Rose = LCD_width_Rose - LCD_marginHoriz_Rose;
+
         public static XYPosition ACRO55_home = new XYPosition(0, 0);
 
+        //MFD
         public XYPosition LCD_topLeftViewingSpot   = new XYPosition(LCD_leftViewingSpots,
                                                                     LCD_topViewingSpots);
         public XYPosition LCD_topCenterViewingSpot = new XYPosition(LCD_centerViewingSpots,
@@ -51,7 +71,7 @@ namespace XYPositionSystem
         public XYPosition LCD_middleLeftViewingSpot   = new XYPosition(LCD_leftViewingSpots,
                                                                        LCD_middleViewingSpots);
         public XYPosition LCD_middleCenterViewingSpot = new XYPosition(LCD_centerViewingSpots,
-                                                                       LCD_middleViewingSpots);
+                                                                       LCD_middleViewingSpots);  //middle centerviewing spot used for both MFD and ROSE since they're the same 
         public XYPosition LCD_middleRightViewingSpot  = new XYPosition(LCD_rightViewingSpots,
                                                                        LCD_middleViewingSpots);
 
@@ -61,6 +81,25 @@ namespace XYPositionSystem
                                                                        LCD_bottomViewingSpots);
         public XYPosition LCD_bottomRightViewingSpot  = new XYPosition(LCD_rightViewingSpots,
                                                                        LCD_bottomViewingSpots);
+        //ROSE
+        public XYPosition LCD_topLeftViewingSpot_Rose = new XYPosition(LCD_leftViewingSpots_Rose,
+                                                                    LCD_topViewingSpots_Rose);
+        public XYPosition LCD_topCenterViewingSpot_Rose = new XYPosition(LCD_centerViewingSpots_Rose,
+                                                                    LCD_topViewingSpots_Rose);
+        public XYPosition LCD_topRightViewingSpot_Rose = new XYPosition(LCD_rightViewingSpots_Rose,
+                                                                    LCD_topViewingSpots_Rose);
+
+        public XYPosition LCD_middleLeftViewingSpot_Rose = new XYPosition(LCD_leftViewingSpots_Rose,
+                                                                       LCD_middleViewingSpots_Rose);
+        public XYPosition LCD_middleRightViewingSpot_Rose = new XYPosition(LCD_rightViewingSpots_Rose,
+                                                                       LCD_middleViewingSpots_Rose);
+
+        public XYPosition LCD_bottomLeftViewingSpot_Rose = new XYPosition(LCD_leftViewingSpots_Rose,
+                                                                       LCD_bottomViewingSpots_Rose);
+        public XYPosition LCD_bottomCenterViewingSpot_Rose = new XYPosition(LCD_centerViewingSpots_Rose,
+                                                                       LCD_bottomViewingSpots_Rose);
+        public XYPosition LCD_bottomRightViewingSpot_Rose  = new XYPosition(LCD_rightViewingSpots_Rose,
+                                                                       LCD_bottomViewingSpots_Rose);
 
         private INI_File _IniFile;
         private string _jogSize;
@@ -149,52 +188,70 @@ namespace XYPositionSystem
 
         private void GetHomeToLcdOffsets()
         {
-            string sectionName = "[Home-to-MFD Offsets]";
+            string partNumber = "850054-002101";  // Use a fixed part number
+            string sectionName = "Home-to-MFD Offsets";  // Ensure the section name matches the parsed one
             string key = null;
 
             try
             {
                 key = "X";
-                _offset_HomeToLCD.X = Convert.ToDouble(_IniFile.GetValue(sectionName, key));
+                _offset_HomeToLCD.X = Convert.ToDouble(_IniFile.GetValue(partNumber, sectionName, key));
                 key = "Y";
-                _offset_HomeToLCD.Y = Convert.ToDouble(_IniFile.GetValue(sectionName, key));
+                _offset_HomeToLCD.Y = Convert.ToDouble(_IniFile.GetValue(partNumber, sectionName, key));
+            }
+            catch (KeyNotFoundException ex)
+            {
+                MessageBox.Show($"Key '{key}' not found in section '{sectionName}' for part number '{partNumber}'.\n" +
+                                $"Exception: {ex.Message}\n\n" +
+                                "Clicking OK will close app.", caption: "Key Not Found");
+                Environment.Exit(0);
             }
             catch (FormatException)
             {
                 MessageBox.Show($"Value has incorrect format in file: '{Path.GetFileName(_IniFile.FileName)}'\n" +
-                    $"Section: {sectionName}, Key: {key}.\n\n" +
-                    $"File location: {new FileInfo(_IniFile.FileName).DirectoryName.Replace(" ", "")}\n\n\n" +
-                    "Clicking OK will close app.", caption: "Incorrect Format");
+                                $"Section: {sectionName}, Key: {key}.\n\n" +
+                                $"File location: {new FileInfo(_IniFile.FileName).DirectoryName.Replace(" ", "")}\n\n\n" +
+                                "Clicking OK will close app.", caption: "Incorrect Format");
                 Environment.Exit(0);
             }
         }
 
-        public static void MoveToHomePosition()
+
+
+
+        // Separate method that accepts CancellationToken
+        public static void MoveToHomePosition(CancellationToken cancellationToken)
         {
             // Move chroma meter to home position
             KillAlarmLock();
             _manResetEvent.Reset();
             GoToHomePosition();
-            _manResetEvent.WaitOne();
+            while (!_manResetEvent.WaitOne(200))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
 
             _chromaMeterPosition = new XYPosition(ACRO55_home);
 
             // In case this method is immediately followed by move-to-position,
-            //    wait for thread to reenter the synchronization domain (MS Docs)
-            Thread.Sleep(200);       // 15 ms works, 10 ms is too short
+            // wait for thread to reenter the synchronization domain (MS Docs)
+            Thread.Sleep(200); // 15 ms works, 10 ms is too short
         }
 
-        public void MoveToPosition(XYPosition desiredPosition)
-        {//moves to center of viewing spot
+        public void MoveToPosition(XYPosition desiredPosition, CancellationToken cancellationToken)
+        {
             if (_chromaMeterPosition != desiredPosition)
             {
-                if(desiredPosition == LCD_middleCenterViewingSpot)
+                if ((desiredPosition == LCD_middleCenterViewingSpot))
                 {
-                    MoveToHomePosition();
+                    MoveToHomePosition(cancellationToken);
                 }
                 _manResetEvent.Reset();
                 GoToSpot(desiredPosition);
-                _manResetEvent.WaitOne();
+                while (!_manResetEvent.WaitOne(200))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
 
                 _chromaMeterPosition = new XYPosition(desiredPosition);
             }
@@ -412,9 +469,11 @@ namespace XYPositionSystem
 
         private void btnHome_Click(object sender, EventArgs e)
         {
-            MoveToHomePosition();
-            //KillAlarmLock();
-            //GoToHomePosition();
+            // Create a CancellationTokenSource
+            CancellationTokenSource cts = new CancellationTokenSource();
+
+            // Call the method that requires the CancellationToken
+            MoveToHomePosition(cts.Token);
         }
 
         private void btnClearAlarm_Click(object sender, EventArgs e)

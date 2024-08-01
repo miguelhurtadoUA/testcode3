@@ -3,11 +3,13 @@ using System.Drawing;
 using System.IO;
 using System.Reflection;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using CS.Libraries.File.Initialization;
 using CS.Libraries.Forms.Prompts;
 using ChromaMeter;
 using XYPositionSystem;
+using System.Media;
 
 namespace CIGALHE.MFD.Optical
 {
@@ -67,19 +69,21 @@ namespace CIGALHE.MFD.Optical
 
         // Class variables
         INI_File _IniFile;
-        CS200    _ChromaMeter;
-        ACRO55   _XYTable;
+        CS200 _ChromaMeter;
+        ACRO55 _XYTable;
         ColorCorrection _ColorCorrection;
         CalibrateACRO55 _CalibrationForm;
-        TiltTableAngle  _tiltTableAngle;
+        TiltTableAngle _tiltTableAngle;
         bool _uutMediumBrightness = false;
         bool _topwardPowerSupplyInitialized;
         Font _treeViewBoldFont = new Font(TreeViewFontName, 9F, FontStyle.Bold);
         Font _treeViewRegularFont = new Font(TreeViewFontName, 9F, FontStyle.Regular);
-        Action[][] _subTests;
+        Func<CancellationToken, Task>[][] _subTests;
 
-        public MFD_Optical()
+
+        public MFD_Optical()  
         {
+
             try
             {
                 _IniFile = new INI_File(INIFILE);
@@ -100,17 +104,36 @@ namespace CIGALHE.MFD.Optical
 
             InitializeComponent();
 
-            _subTests = new Action [][]
+
+            _subTests = new Func<CancellationToken, Task>[][]
             {
-                new Action[] { new Action(Test1_PowerOnAndColorPattern) },//CHANGE RENFERNCES HERE
-                new Action[] { new Action(Test2_1_AssessScratches), new Action(Test2_2_AssessBlemishes), new Action(Test2_3_AssessDefectivePixels) },
-                new Action[] { new Action(Test3_TestContrast_Day), new Action(Test4_TestBrightnessRange_Day),
-                               new Action(Test5_TestLuminanceHomogeneity_Day), new Action(Test6_TestColorCoordinatesAndUniformity_Day) },
-                new Action[] { new Action(Test7_TestBrightnessRange_NVG), new Action(Test8_TestLuminanceHomogeneity_NVG),
-                               new Action(Test9_TestColorCoordinates_NVG), new Action(Test10_TestNVGCompatibility),
-                               new Action(Test11_TestBezelLighting),new Action(Test12_BezelBacklightingTest), new Action(Test13_TestPowerLED) },
-                new Action[] { new Action(Test14_TestPowerOff) }
+                new Func<CancellationToken, Task>[] { async token => await Test1_PowerOnAndColorPattern(token) },
+                new Func<CancellationToken, Task>[]
+                {
+                    async token => await Test2_1_AssessScratches(token),
+                    async token => await Test2_2_AssessBlemishesAsync(token),
+                    async token => await Test2_3_AssessDefectivePixelsAsync(token)
+                },
+                new Func<CancellationToken, Task>[]
+                {
+                    async token => await Test3_TestContrast_DayAsync(token),
+                    async token => await Test4_TestBrightnessRange_DayAsync(token),
+                    async token => await Test5_TestLuminanceHomogeneity_DayAsync(token),
+                    async token => await Test6_TestColorCoordinatesAndUniformity_DayAsync(token)
+                },
+                new Func<CancellationToken, Task>[]
+                {
+                    async token => await Test7_TestBrightnessRange_NVGAsync(token),
+                    async token => await Test8_TestLuminanceHomogeneity_NVGAsync(token),
+                    async token => await Test9_TestColorCoordinates_NVGAsync(token),
+                    async token => await Test10_TestNVGCompatibilityAsync(token),
+                    async token => await Test11_TestBezelLightingAsync(token),
+                    async token => await Test12_BezelBacklightingTestAsync(token),
+                    async token => await Test13_TestPowerLEDAsync(token)
+                },
+                new Func<CancellationToken, Task>[] { async token => await Test14_TestPowerOffAsync(token) }
             };
+
 
             rtbTestResults.SelectionIndent = 15;
             this.KeyDown += new KeyEventHandler(MFD_Optical_KeyDown);
@@ -120,7 +143,7 @@ namespace CIGALHE.MFD.Optical
         {
             if (e.KeyCode == Keys.F9)
             {
-                await RunTests();
+                await RunTestsAsync();
             }
         }
 
@@ -152,7 +175,7 @@ namespace CIGALHE.MFD.Optical
             _XYTable.CloseSerialPort();                     // Comment out this line when no hardware is connected
         }
 
-        private void MFD_OpticalForm_Shown(object sender, EventArgs e)
+        private async void MFD_OpticalForm_Shown(object sender, EventArgs e)
         {
             Popup.Show("On the chroma meter, verify that the focus adjustment ring is set to approximately 0.55 m.\n\n" +
                        "This is set by looking down through the CS-200 chroma meter at the lit display of the MFD\n" +
@@ -167,16 +190,41 @@ namespace CIGALHE.MFD.Optical
                         title: "View Angle Selector", msgBoxButtons: MessageBoxButtons.OK,
                         imageFile: ImagesFolder + "View Angle Selector.png",
                         imagePopupTitle: "VIEW ANGLE Selector");
+            // put in the popup here
+            Popup.Show("Verify that computer audio volume is at an audible level.\n\n" +
+                       "(The sound will play for 10 seconds after this popup. Please adjust volume as necessary.)",
+                       title: "Volume Adjustment", msgBoxButtons: MessageBoxButtons.OK);
+            //play the sound for 5 seconds after the popup
+            await PlaySoundForDurationAsync("Bird_in_Rain.wav", 10000); // Play sound for 10 seconds
 
             _task = "";
             _testSection = "";
             _testName = "";
             UpdateTestNameAndStatusFields("Ready");
         }
+        private async Task PlaySoundForDurationAsync(string soundFile, int duration)
+        {
+            if (File.Exists(soundFile))
+            {
+                _progressSoundPlayer = new SoundPlayer(soundFile);
+                _progressSoundPlayer.PlayLooping();
+
+                await Task.Delay(duration);
+
+                _progressSoundPlayer.Stop();
+            }
+            else
+            {
+                MessageBox.Show($"Sound file {soundFile} not found.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
 
         private async void btnRun_Click(object sender, EventArgs e)
         {
-            await RunTests();
+            using (var cts = new CancellationTokenSource())
+            {
+                await RunTestsAsync(cts.Token);
+            }
         }
 
         private void btnExit_Click(object sender, EventArgs e)
@@ -201,10 +249,14 @@ namespace CIGALHE.MFD.Optical
         {
             this.testSelectionTree.AfterCheck -= new System.Windows.Forms.TreeViewEventHandler(this.treeSelectedTests_AfterCheck);
 
-            testSelectionTree.BeginUpdate();
+            if (e.Node.Checked)
+            {
+                CheckPrerequisites(e.Node);
+                CheckPowerOffPostRequisite();
+            }
+
             SetAllChildCheckboxesTheSame(e.Node);
             UpdateParentNodesCheckboxes(e.Node);
-            testSelectionTree.EndUpdate();
 
             if (AtLeastOneNodeChecked())
             {
@@ -220,13 +272,55 @@ namespace CIGALHE.MFD.Optical
             this.testSelectionTree.AfterCheck += new System.Windows.Forms.TreeViewEventHandler(this.treeSelectedTests_AfterCheck);
         }
 
+        private void CheckPrerequisites(TreeNode node)
+        {
+            if (testPrerequisites.ContainsKey(node.Text))
+            {
+                foreach (string prerequisite in testPrerequisites[node.Text])
+                {
+                    TreeNode prerequisiteNode = FindNodeByText(testSelectionTree.Nodes[0], prerequisite);
+                    if (prerequisiteNode != null && !prerequisiteNode.Checked)
+                    {
+                        prerequisiteNode.Checked = true;
+                        CheckPrerequisites(prerequisiteNode);
+                    }
+                }
+            }
+        }
+
+        private void CheckPowerOffPostRequisite()
+        {
+            TreeNode powerOffNode = FindNodeByText(testSelectionTree.Nodes[0], "5.1. Power Off");
+            if (powerOffNode != null && !powerOffNode.Checked)
+            {
+                powerOffNode.Checked = true;
+            }
+        }
+
+        private TreeNode FindNodeByText(TreeNode parentNode, string text)
+        {
+            foreach (TreeNode node in parentNode.Nodes)
+            {
+                if (node.Text == text)
+                {
+                    return node;
+                }
+                TreeNode foundNode = FindNodeByText(node, text);
+                if (foundNode != null)
+                {
+                    return foundNode;
+                }
+            }
+            return null;
+        }
+
         private bool AtLeastOneNodeChecked()
         {
             foreach (TreeNode taskNode in testSelectionTree.Nodes[0].Nodes)
             {
                 foreach (TreeNode testNode in taskNode.Nodes)
                 {
-                    if(testNode.Checked) return true;
+                    if (testNode.Checked) return true;
                 }
             }
             return false;
@@ -337,15 +431,19 @@ namespace CIGALHE.MFD.Optical
         private async void mnuFullTest_Click(object sender, System.EventArgs e)
         {
             mnuFullTest.Enabled = false;
-            await RunTests();
+            using (var cts = new CancellationTokenSource())
+            {
+                await RunTestsAsync(cts.Token);
+            }
             mnuFullTest.Enabled = true;
         }
 
         private void mnuPowerOn_Click(object sender, System.EventArgs e)
         {
-            Thread opticalTestThread = new Thread(Test1_PowerOnAndColorPattern); 
-            opticalTestThread.Start();
-            Thread.Sleep(500);
+            using (var cts = new CancellationTokenSource())
+            {
+                _subTests[0][0](cts.Token);
+            }
         }
 
         private void mnuEnterTestInfo_Click(object sender, EventArgs e)
@@ -446,7 +544,7 @@ namespace CIGALHE.MFD.Optical
             PostBlankLine();
             _unitsOfMeasure = "---";
             PostCalculatedResultHeader("Contrast");
-            PostMeasurement(MeasurementFormatInt, "H: 45, V: 30 deg.",  50, ContrastRatioLowerLimit, ContrastRatioUpperLimit);
+            PostMeasurement(MeasurementFormatInt, "H: 45, V: 30 deg.", 50, ContrastRatioLowerLimit, ContrastRatioUpperLimit);
             PostMeasurement(MeasurementFormatInt, "H: 45, V:-10 deg.", 214, ContrastRatioLowerLimit, ContrastRatioUpperLimit);
 
             _testSection = "3.2";

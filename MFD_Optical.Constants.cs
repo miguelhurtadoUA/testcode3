@@ -119,11 +119,12 @@
         const int Failed3To5PixelClusterMaximum    =  3;
         const int MaximumClusterFailuresWithin30mm =  0;
 
-        const int ContrastRatioLowerLimit =  20;
-        const int ContrastRatioUpperLimit = 350;
+        const int ContrastRatioLowerLimit =  20; // Same for both displays 
+        const int ContrastRatioUpperLimit = 350; // Rose has upper limit of 1000
+        const int ContrastRatioUpperLimitRose = 1000; 
 
-        const int BrightnessDayNormalMaxLowerLimit    = 240;
-        const int BrightnessDayNormalMaxUpperLimit    = 450;
+        const int BrightnessDayNormalMaxLowerLimit    = 240; // should be same for Rose, MFD only uses the lower value 
+        const int BrightnessDayNormalMaxUpperLimit    = 450; // Rose same as MFD just absent in the CIGAHLE ATP, max value never used for MFD 
         const int BrightnessDayNormalMedLowerLimit    =  80;
         const int BrightnessDayNormalMedUpperLimit    = 120;
         const double BrightnessDayNormalMinLowerLimit = 0.00;
@@ -138,8 +139,9 @@
         const double BrightnessNVGMinLowerLimit = 0.00;
         const double BrightnessNVGMinUpperLimit = 0.03;
 
-        const double LuminanceHomogeneityLowerLimit = 0.70;
-        const double LuminanceHomogeneityUpperLimit = 1.00;
+        const double LuminanceHomogeneityLowerLimitRose = 0.60; //for Rose
+        const double LuminanceHomogeneityLowerLimit = 0.70; 
+        const double LuminanceHomogeneityUpperLimit = 1.00; // Same for Rose
 
         const double DayRedUPrime   = 0.445;
         const double DayRedVPrime   = 0.525;
